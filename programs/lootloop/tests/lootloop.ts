@@ -1,35 +1,110 @@
 import * as anchor from "@anchor-lang/core";
 import { Program } from "@anchor-lang/core";
 import { Lootloop } from "../../../target/types/lootloop";
-import { PublicKey, SystemProgram, LAMPORTS_PER_SOL } from "@solana/web3.js";
+import {
+  PublicKey,
+  SystemProgram,
+  LAMPORTS_PER_SOL,
+  Ed25519Program,
+  SYSVAR_INSTRUCTIONS_PUBKEY,
+} from "@solana/web3.js";
 import { expect } from "chai";
 
-describe("LootLoop", () => {
+describe("LootLoop v0.3 Unified Quest Engine", () => {
   const provider = anchor.AnchorProvider.env();
   anchor.setProvider(provider);
 
   const program = anchor.workspace.Lootloop as Program<Lootloop>;
   const publisher = (provider.wallet as anchor.Wallet).payer;
   const reviewerKeypair = anchor.web3.Keypair.generate();
-  const reviewer = reviewerKeypair.publicKey;
-  const oneMinute = new anchor.BN(60);
-  const platformFeeBps = new anchor.BN(200);
-  const bpsDenominator = new anchor.BN(10_000);
-  const minAmount = new anchor.BN(1_000_000);
+  const strangerKeypair = anchor.web3.Keypair.generate();
+  const submitterA = anchor.web3.Keypair.generate();
+  const submitterB = anchor.web3.Keypair.generate();
+  const submitterC = anchor.web3.Keypair.generate();
+  const verifierKeypair = anchor.web3.Keypair.generate();
+  const wrongVerifierKeypair = anchor.web3.Keypair.generate();
 
-  const deriveQuestPda = (questId: anchor.BN) =>
+  const MIN_DURATION = new anchor.BN(60);
+  const PERIOD = new anchor.BN(60);
+  const FAST_PERIOD = new anchor.BN(1);
+  const RECENT_CYCLE_WINDOW = 32;
+  const REWARD = new anchor.BN(1_000_000);
+  const BIG_REWARD = new anchor.BN(5_000_000);
+  const PLATFORM_FEE_BPS = new anchor.BN(200);
+  const CANCEL_FEE_BPS = new anchor.BN(100);
+  const BPS_DENOMINATOR = new anchor.BN(10_000);
+
+  let questCounter = new anchor.BN(Date.now());
+
+  const nextQuestId = () => {
+    questCounter = questCounter.add(new anchor.BN(1));
+    return questCounter;
+  };
+
+  const oneTime = { oneTime: {} };
+  const recurring = { recurring: {} };
+  const manual = { manual: {} };
+  const autoVerified = { autoVerified: {} };
+  const customSigned = { customSigned: {} };
+  const distanceActivity = { distanceActivity: {} };
+  const defaultPubkey = new PublicKey("11111111111111111111111111111111");
+  const validTemplateHash = Array.from({ length: 32 }, (_, idx) => idx + 1);
+  const zeroHash = Array(32).fill(0);
+
+  const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+  const airdrop = async (keypair: anchor.web3.Keypair) => {
+    const sig = await provider.connection.requestAirdrop(
+      keypair.publicKey,
+      2 * LAMPORTS_PER_SOL
+    );
+    await provider.connection.confirmTransaction(sig, "confirmed");
+  };
+
+  before(async () => {
+    await Promise.all([
+      airdrop(submitterA),
+      airdrop(submitterB),
+      airdrop(submitterC),
+      airdrop(strangerKeypair),
+    ]);
+  });
+
+  const deriveQuestPda = (questId: anchor.BN, pubkey = publisher.publicKey) =>
     PublicKey.findProgramAddressSync(
       [
         Buffer.from("quest"),
-        publisher.publicKey.toBuffer(),
+        pubkey.toBuffer(),
         questId.toArrayLike(Buffer, "le", 8),
       ],
       program.programId
     );
 
-  const deriveVaultPda = (quest: PublicKey) =>
+  const deriveRewardPoolPda = (quest: PublicKey) =>
     PublicKey.findProgramAddressSync(
-      [Buffer.from("vault"), quest.toBuffer()],
+      [Buffer.from("reward_pool"), quest.toBuffer()],
+      program.programId
+    );
+
+  const deriveDepositPoolPda = (quest: PublicKey) =>
+    PublicKey.findProgramAddressSync(
+      [Buffer.from("deposit_pool"), quest.toBuffer()],
+      program.programId
+    );
+
+  const deriveSubmissionPda = (quest: PublicKey, index: anchor.BN) =>
+    PublicKey.findProgramAddressSync(
+      [
+        Buffer.from("submission"),
+        quest.toBuffer(),
+        index.toArrayLike(Buffer, "le", 8),
+      ],
+      program.programId
+    );
+
+  const deriveUserProgressPda = (quest: PublicKey, user: PublicKey) =>
+    PublicKey.findProgramAddressSync(
+      [Buffer.from("user_progress"), quest.toBuffer(), user.toBuffer()],
       program.programId
     );
 
@@ -45,732 +120,1233 @@ describe("LootLoop", () => {
       program.programId
     );
 
-  const deriveSubmissionPda = (quest: PublicKey, submitter: PublicKey) =>
-    PublicKey.findProgramAddressSync(
-      [Buffer.from("submission"), quest.toBuffer(), submitter.toBuffer()],
-      program.programId
+  const expectAnchorError = (err: unknown, errorName: string) => {
+    const anyErr = err as any;
+    const code = anyErr.error?.errorCode?.code ?? "";
+    expect(code === errorName || String(anyErr).includes(errorName)).to.equal(
+      true,
+      `expected ${errorName}, got ${String(anyErr)}`
+    );
+  };
+
+  const transferLamports = async (to: PublicKey, lamports: number) => {
+    const tx = new anchor.web3.Transaction().add(
+      SystemProgram.transfer({
+        fromPubkey: publisher.publicKey,
+        toPubkey: to,
+        lamports,
+      })
+    );
+    await provider.sendAndConfirm(tx, []);
+  };
+
+  const createQuest = async ({
+    mode = oneTime,
+    reviewMode = manual,
+    verificationTemplate = customSigned,
+    templateConfigHash = zeroHash,
+    verificationSchemaUri = "",
+    authorizedVerifier = defaultPubkey,
+    rewardPerCompletion = REWARD,
+    initialRewardFunding = REWARD.mul(new anchor.BN(3)),
+    depositAmount,
+    durationSeconds = MIN_DURATION,
+    periodSeconds = new anchor.BN(0),
+    queueMax = 2,
+    metadataUri,
+  }: {
+    mode?: any;
+    reviewMode?: any;
+    verificationTemplate?: any;
+    templateConfigHash?: number[];
+    verificationSchemaUri?: string;
+    authorizedVerifier?: PublicKey;
+    rewardPerCompletion?: anchor.BN;
+    initialRewardFunding?: anchor.BN;
+    depositAmount?: anchor.BN;
+    durationSeconds?: anchor.BN;
+    periodSeconds?: anchor.BN;
+    queueMax?: number;
+    metadataUri?: string;
+  } = {}) => {
+    const questId = nextQuestId();
+    const [quest] = deriveQuestPda(questId);
+    const [rewardPool] = deriveRewardPoolPda(quest);
+    const [depositPool] = deriveDepositPoolPda(quest);
+    const [feeVault] = deriveFeeVaultPda();
+    const [publicGoodsPool] = derivePublicGoodsPoolPda();
+    const requiredDeposit = rewardPerCompletion.mul(
+      new anchor.BN(queueMax + 1)
     );
 
-  const createQuest = async (
-    questId: anchor.BN,
-    metadataUri: string,
-    rewardAmount: anchor.BN,
-    durationSeconds = oneMinute
-  ) => {
-    const [quest] = deriveQuestPda(questId);
-    const [vault] = deriveVaultPda(quest);
-    const [feeVault] = deriveFeeVaultPda();
-
-    const signature = await program.methods
-      .createQuest(questId, metadataUri, reviewer, rewardAmount, durationSeconds)
+    await program.methods
+      .createQuest(
+        questId,
+        mode,
+        reviewMode,
+        verificationTemplate,
+        templateConfigHash,
+        verificationSchemaUri,
+        authorizedVerifier,
+        metadataUri ?? `https://lootloop.example/${questId.toString()}.json`,
+        reviewerKeypair.publicKey,
+        rewardPerCompletion,
+        initialRewardFunding,
+        depositAmount ?? requiredDeposit,
+        durationSeconds,
+        periodSeconds,
+        queueMax
+      )
       .accountsPartial({
         quest,
-        vault,
+        rewardPool,
+        depositPool,
         feeVault,
+        publicGoodsPool,
         publisher: publisher.publicKey,
         systemProgram: SystemProgram.programId,
       })
       .rpc();
 
-    return { quest, vault, feeVault, signature };
+    return {
+      questId,
+      quest,
+      rewardPool,
+      depositPool,
+      feeVault,
+      publicGoodsPool,
+      rewardPerCompletion,
+      initialRewardFunding,
+      depositAmount: depositAmount ?? requiredDeposit,
+      queueMax,
+    };
   };
 
-  const submitProof = async (quest: PublicKey, proofUri: string) => {
-    const [submission] = deriveSubmissionPda(quest, publisher.publicKey);
+  const submitProof = async (
+    quest: PublicKey,
+    submitter: anchor.web3.Keypair,
+    proofUri = "https://lootloop.example/proof.json"
+  ) => {
+    const questAccount = await program.account.quest.fetch(quest);
+    const index = questAccount.nextSubmissionIndex;
+    const [submission] = deriveSubmissionPda(quest, index);
+    const [userProgress] = deriveUserProgressPda(quest, submitter.publicKey);
 
-    const signature = await program.methods
+    await program.methods
       .submitProof(proofUri)
       .accountsPartial({
         quest,
         submission,
-        submitter: publisher.publicKey,
+        userProgress,
+        submitter: submitter.publicKey,
         systemProgram: SystemProgram.programId,
       })
+      .signers([submitter])
       .rpc();
 
-    return { submission, signature };
+    return { submission, index, userProgress };
+  };
+
+  const cycleState = (progress: any, cycleIndex: anchor.BN) => {
+    const idx = progress.recentCycles.findIndex((cycle: anchor.BN) =>
+      cycle.eq(cycleIndex)
+    );
+    return idx >= 0 ? progress.recentCycleStates[idx] : 0;
+  };
+
+  const submitProofAfterCycleAdvance = async (
+    quest: PublicKey,
+    submitter: anchor.web3.Keypair,
+    lastCycle: anchor.BN
+  ) => {
+    for (let attempt = 0; attempt < 10; attempt += 1) {
+      await sleep(1_100);
+      try {
+        const submitted = await submitProof(quest, submitter);
+        const submissionAccount = await program.account.submission.fetch(
+          submitted.submission
+        );
+        expect(submissionAccount.cycleIndex.gt(lastCycle)).to.equal(true);
+        return { ...submitted, submissionAccount };
+      } catch (err) {
+        const anyErr = err as any;
+        const code = anyErr.error?.errorCode?.code ?? "";
+        if (code === "CycleAlreadySubmitted" || String(err).includes("CycleAlreadySubmitted")) {
+          continue;
+        }
+        throw err;
+      }
+    }
+
+    throw new Error("Timed out waiting for the recurring cycle to advance");
   };
 
   const approveSubmission = async (
     quest: PublicKey,
     submission: PublicKey,
-    reviewerSigner = reviewerKeypair
+    submitter: PublicKey,
+    reviewer = reviewerKeypair
   ) => {
-    const signature = await program.methods
+    const [rewardPool] = deriveRewardPoolPda(quest);
+    const [depositPool] = deriveDepositPoolPda(quest);
+    const [userProgress] = deriveUserProgressPda(quest, submitter);
+
+    await program.methods
       .approveSubmission()
       .accountsPartial({
         quest,
         submission,
-        reviewer: reviewerSigner.publicKey,
+        submitter,
+        userProgress,
+        rewardPool,
+        depositPool,
+        reviewer: reviewer.publicKey,
+        systemProgram: SystemProgram.programId,
       })
-      .signers([reviewerSigner])
+      .signers([reviewer])
       .rpc();
-
-    return { signature };
   };
 
-  const claimReward = async (
+  const rejectSubmission = async (
     quest: PublicKey,
     submission: PublicKey,
-    submitterSigner = publisher
+    submitter: PublicKey,
+    reviewer = reviewerKeypair
   ) => {
-    const [vault] = deriveVaultPda(quest);
+    const [userProgress] = deriveUserProgressPda(quest, submitter);
 
-    const builder = program.methods
-      .claimReward()
+    await program.methods
+      .rejectSubmission()
       .accountsPartial({
         quest,
         submission,
-        vault,
-        submitter: submitterSigner.publicKey,
-        systemProgram: SystemProgram.programId,
-      });
-
-    if (!submitterSigner.publicKey.equals(publisher.publicKey)) {
-      builder.signers([submitterSigner]);
-    }
-
-    const signature = await builder.rpc();
-
-    return { vault, signature };
+        userProgress,
+        reviewer: reviewer.publicKey,
+      })
+      .signers([reviewer])
+      .rpc();
   };
 
-  const topUpQuest = async (
+  const templateTypeIndex = (template: any) => {
+    const key = Object.keys(template)[0];
+    return [
+      "distanceActivity",
+      "studyDuration",
+      "githubContribution",
+      "attendanceCheckin",
+      "customSigned",
+    ].indexOf(key);
+  };
+
+  const writeU32 = (value: number) => {
+    const out = Buffer.alloc(4);
+    out.writeUInt32LE(value, 0);
+    return out;
+  };
+
+  const writeI64 = (value: anchor.BN) => {
+    const out = Buffer.alloc(8);
+    out.writeBigInt64LE(BigInt(value.toString()), 0);
+    return out;
+  };
+
+  const serializeVerificationResult = (result: any) => {
+    const domain = Buffer.from(result.domain, "utf8");
+    return Buffer.concat([
+      writeU32(domain.length),
+      domain,
+      result.programId.toBuffer(),
+      result.quest.toBuffer(),
+      result.submissionIndex.toArrayLike(Buffer, "le", 8),
+      result.submitter.toBuffer(),
+      result.cycleIndex.toArrayLike(Buffer, "le", 8),
+      Buffer.from([templateTypeIndex(result.templateType)]),
+      Buffer.from(result.templateConfigHash),
+      Buffer.from(result.externalProofHash),
+      result.verifiedValue.toArrayLike(Buffer, "le", 8),
+      Buffer.from([result.passed ? 1 : 0]),
+      writeI64(result.verifiedAt),
+      writeI64(result.expiresAt),
+      Buffer.from(result.nonce),
+    ]);
+  };
+
+  const buildVerificationResult = async (
     quest: PublicKey,
-    topUpAmount: anchor.BN,
-    extendDurationSeconds = new anchor.BN(0),
-    publisherSigner = publisher
+    submission: PublicKey,
+    overrides: Record<string, unknown> = {}
   ) => {
-    const [vault] = deriveVaultPda(quest);
-    const [feeVault] = deriveFeeVaultPda();
-
-    const builder = program.methods
-      .topUpQuest(topUpAmount, extendDurationSeconds)
-      .accountsPartial({
-        quest,
-        vault,
-        feeVault,
-        publisher: publisherSigner.publicKey,
-        systemProgram: SystemProgram.programId,
-      });
-
-    if (!publisherSigner.publicKey.equals(publisher.publicKey)) {
-      builder.signers([publisherSigner]);
-    }
-
-    const signature = await builder.rpc();
-    return { vault, feeVault, signature };
+    const questAccount = await program.account.quest.fetch(quest);
+    const submissionAccount = await program.account.submission.fetch(submission);
+    const now = Math.floor(Date.now() / 1000);
+    return {
+      domain: "LootLoopAutoReviewV1",
+      programId: program.programId,
+      quest,
+      submissionIndex: submissionAccount.submissionIndex,
+      submitter: submissionAccount.submitter,
+      cycleIndex: submissionAccount.cycleIndex,
+      templateType: questAccount.verificationTemplate,
+      templateConfigHash: Array.from(questAccount.templateConfigHash),
+      externalProofHash: Array.from({ length: 32 }, (_, idx) => 200 - idx),
+      verifiedValue: new anchor.BN(123),
+      passed: true,
+      verifiedAt: new anchor.BN(now),
+      expiresAt: new anchor.BN(now + 300),
+      nonce: Array.from({ length: 32 }, (_, idx) => 50 + idx),
+      ...overrides,
+    };
   };
 
-  const cancelQuest = async (quest: PublicKey, publisherSigner = publisher) => {
-    const [vault] = deriveVaultPda(quest);
-    const [publicGoodsPool] = derivePublicGoodsPoolPda();
-
-    const builder = program.methods
-      .cancelQuest()
-      .accountsPartial({
-        quest,
-        vault,
-        publicGoodsPool,
-        publisher: publisherSigner.publicKey,
-        systemProgram: SystemProgram.programId,
-      });
-
-    if (!publisherSigner.publicKey.equals(publisher.publicKey)) {
-      builder.signers([publisherSigner]);
-    }
-
-    const signature = await builder.rpc();
-    return { vault, publicGoodsPool, signature };
-  };
-
-  const expectAnchorError = (err: unknown, errorName: string) => {
-    const anyErr = err as any;
-    expect(
-      anyErr.error?.errorCode?.code ?? anyErr.error?.errorCode?.number ?? ""
-    ).to.satisfy((value: string | number) =>
-      value === errorName || String(anyErr).includes(errorName)
+  const autoApproveSubmission = async (
+    quest: PublicKey,
+    submission: PublicKey,
+    signer = verifierKeypair,
+    overrides: Record<string, unknown> = {}
+  ) => {
+    const submissionAccount = await program.account.submission.fetch(submission);
+    const [rewardPool] = deriveRewardPoolPda(quest);
+    const [depositPool] = deriveDepositPoolPda(quest);
+    const [userProgress] = deriveUserProgressPda(
+      quest,
+      submissionAccount.submitter
     );
-  };
-
-  it("creates a Quest and stores the reward in the vault", async () => {
-    const questId = new anchor.BN(1);
-    const metadataUri = "https://lootloop.example/quests/1.json";
-    const rewardAmount = new anchor.BN(0.25 * LAMPORTS_PER_SOL);
-    const [quest] = deriveQuestPda(questId);
-    const [vault] = deriveVaultPda(quest);
-    const [feeVault] = deriveFeeVaultPda();
-    const feeAmount = rewardAmount.mul(platformFeeBps).div(bpsDenominator);
-
-    const vaultBalanceBefore = await provider.connection.getBalance(vault);
-    const feeVaultBalanceBefore = await provider.connection.getBalance(feeVault);
-
-    const tx = await program.methods
-      .createQuest(questId, metadataUri, reviewer, rewardAmount, oneMinute)
+    const verificationResult = await buildVerificationResult(
+      quest,
+      submission,
+      overrides
+    );
+    const message = serializeVerificationResult(verificationResult);
+    const ed25519Ix = Ed25519Program.createInstructionWithPrivateKey({
+      privateKey: signer.secretKey,
+      message,
+    });
+    const autoIx = await program.methods
+      .autoApproveSubmission(verificationResult as any)
       .accountsPartial({
         quest,
-        vault,
+        submission,
+        submitter: submissionAccount.submitter,
+        userProgress,
+        rewardPool,
+        depositPool,
+        instructionsSysvar: SYSVAR_INSTRUCTIONS_PUBKEY,
+        caller: publisher.publicKey,
+        systemProgram: SystemProgram.programId,
+      })
+      .instruction();
+    const tx = new anchor.web3.Transaction().add(ed25519Ix, autoIx);
+    await provider.sendAndConfirm(tx, []);
+  };
+
+  const fundQuest = async (
+    quest: PublicKey,
+    rewardFundingAmount: anchor.BN,
+    additionalDepositAmount = new anchor.BN(0),
+    extendDurationSeconds = new anchor.BN(0)
+  ) => {
+    const [rewardPool] = deriveRewardPoolPda(quest);
+    const [depositPool] = deriveDepositPoolPda(quest);
+    const [feeVault] = deriveFeeVaultPda();
+
+    await program.methods
+      .fundQuest(
+        rewardFundingAmount,
+        additionalDepositAmount,
+        extendDurationSeconds
+      )
+      .accountsPartial({
+        quest,
+        rewardPool,
+        depositPool,
         feeVault,
         publisher: publisher.publicKey,
         systemProgram: SystemProgram.programId,
       })
       .rpc();
-    console.log("✅ Create quest tx:", tx);
+  };
 
+  const closeQuest = async (quest: PublicKey) => {
+    const [rewardPool] = deriveRewardPoolPda(quest);
+    const [depositPool] = deriveDepositPoolPda(quest);
+    const [feeVault] = deriveFeeVaultPda();
+    const [publicGoodsPool] = derivePublicGoodsPoolPda();
+
+    await program.methods
+      .closeQuest()
+      .accountsPartial({
+        quest,
+        rewardPool,
+        depositPool,
+        feeVault,
+        publicGoodsPool,
+        publisher: publisher.publicKey,
+        systemProgram: SystemProgram.programId,
+      })
+      .rpc();
+  };
+
+  const settleQuest = async (quest: PublicKey) => {
+    const [rewardPool] = deriveRewardPoolPda(quest);
+    const [depositPool] = deriveDepositPoolPda(quest);
+    const [feeVault] = deriveFeeVaultPda();
+    const [publicGoodsPool] = derivePublicGoodsPoolPda();
+
+    await program.methods
+      .settleQuest()
+      .accountsPartial({
+        quest,
+        rewardPool,
+        depositPool,
+        publisher: publisher.publicKey,
+        feeVault,
+        publicGoodsPool,
+        caller: publisher.publicKey,
+        systemProgram: SystemProgram.programId,
+      })
+      .rpc();
+  };
+
+  it("creates a OneTime quest and funds reward/deposit pools", async () => {
+    const { quest, rewardPool, depositPool, feeVault } = await createQuest();
     const account = await program.account.quest.fetch(quest);
-    expect(account.questId.toNumber()).to.equal(questId.toNumber());
-    expect(account.publisher.toString()).to.equal(publisher.publicKey.toString());
-    expect(account.reviewer.toString()).to.equal(reviewer.toString());
-    expect(account.rewardAmount.toNumber()).to.equal(rewardAmount.toNumber());
-    expect(account.totalFundedAmount.toNumber()).to.equal(rewardAmount.toNumber());
-    expect(account.totalFeePaid.toNumber()).to.equal(feeAmount.toNumber());
-    expect(account.createdAt.toNumber()).to.be.greaterThan(0);
-    expect(account.expiresAt.toNumber()).to.equal(
-      account.createdAt.add(oneMinute).toNumber()
-    );
-    expect(account.cancelledAt.toNumber()).to.equal(0);
+
+    expect(account.mode).to.deep.equal({ oneTime: {} });
     expect(account.status).to.deep.equal({ open: {} });
-    expect(account.approvedSubmitter).to.equal(null);
-    expect(account.submissionCount.toNumber()).to.equal(0);
-    expect(account.rewardClaimed).to.equal(false);
-    expect(account.metadataUri).to.equal(metadataUri);
-
-    const vaultBalanceAfter = await provider.connection.getBalance(vault);
-    expect(vaultBalanceBefore).to.equal(0);
-    expect(vaultBalanceAfter).to.equal(rewardAmount.toNumber());
-    expect(await provider.connection.getBalance(feeVault)).to.equal(
-      feeVaultBalanceBefore + feeAmount.toNumber()
+    expect(account.pendingCount).to.equal(0);
+    expect(account.nextSubmissionIndex.toNumber()).to.equal(0);
+    expect(account.nextReviewIndex.toNumber()).to.equal(0);
+    expect(await provider.connection.getBalance(rewardPool)).to.equal(
+      REWARD.mul(new anchor.BN(3)).toNumber()
     );
+    expect(await provider.connection.getBalance(depositPool)).to.equal(
+      REWARD.mul(new anchor.BN(3)).toNumber()
+    );
+    expect(await provider.connection.getBalance(feeVault)).to.be.greaterThan(0);
   });
 
-  it("fails when reward_amount is zero", async () => {
+  it("creates a Recurring quest with period_seconds", async () => {
+    const { quest } = await createQuest({
+      mode: recurring,
+      periodSeconds: PERIOD,
+    });
+    const account = await program.account.quest.fetch(quest);
+    expect(account.mode).to.deep.equal({ recurring: {} });
+    expect(account.periodSeconds.toNumber()).to.equal(PERIOD.toNumber());
+  });
+
+  it("creates an AutoVerified quest with verifier template settings", async () => {
+    const { quest } = await createQuest({
+      reviewMode: autoVerified,
+      verificationTemplate: distanceActivity,
+      templateConfigHash: validTemplateHash,
+      verificationSchemaUri: "https://lootloop.example/schema/distance-v1.json",
+      authorizedVerifier: verifierKeypair.publicKey,
+    });
+    const account = await program.account.quest.fetch(quest);
+    expect(account.reviewMode).to.deep.equal({ autoVerified: {} });
+    expect(account.verificationTemplate).to.deep.equal({ distanceActivity: {} });
+    expect(account.authorizedVerifier.toString()).to.equal(
+      verifierKeypair.publicKey.toString()
+    );
+    expect(Array.from(account.templateConfigHash)).to.deep.equal(validTemplateHash);
+  });
+
+  it("rejects AutoVerified quest creation without an authorized verifier", async () => {
     try {
-      await createQuest(
-        new anchor.BN(100),
-        "https://lootloop.example/quests/zero-reward.json",
-        new anchor.BN(0)
-      );
-      expect.fail("createQuest should reject a zero reward");
+      await createQuest({
+        reviewMode: autoVerified,
+        templateConfigHash: validTemplateHash,
+        verificationSchemaUri: "https://lootloop.example/schema/auto.json",
+        authorizedVerifier: defaultPubkey,
+      });
+      expect.fail("createQuest should reject missing authorized verifier");
     } catch (err) {
-      expectAnchorError(err, "InvalidRewardAmount");
+      expectAnchorError(err, "InvalidAuthorizedVerifier");
     }
   });
 
-  it("fails when metadata_uri is too long", async () => {
+  it("rejects AutoVerified quest creation with a zero template hash", async () => {
     try {
-      await createQuest(new anchor.BN(101), "x".repeat(201), new anchor.BN(1));
-      expect.fail("createQuest should reject oversized metadata_uri");
+      await createQuest({
+        reviewMode: autoVerified,
+        templateConfigHash: zeroHash,
+        verificationSchemaUri: "https://lootloop.example/schema/auto.json",
+        authorizedVerifier: verifierKeypair.publicKey,
+      });
+      expect.fail("createQuest should reject zero template hash");
     } catch (err) {
-      expectAnchorError(err, "MetadataUriTooLong");
+      expectAnchorError(err, "InvalidTemplateConfigHash");
     }
   });
 
-  it("fails when duration_seconds is shorter than one minute", async () => {
+  it("rejects create_quest when deposit is below the required amount", async () => {
     try {
-      await createQuest(
-        new anchor.BN(102),
-        "https://lootloop.example/quests/short-duration.json",
-        minAmount,
-        new anchor.BN(59)
-      );
-      expect.fail("createQuest should reject a duration shorter than one minute");
+      await createQuest({ depositAmount: REWARD });
+      expect.fail("createQuest should reject insufficient deposit");
     } catch (err) {
-      expectAnchorError(err, "DurationTooShort");
+      expectAnchorError(err, "InsufficientDeposit");
     }
   });
 
-  it("allows the same publisher to create multiple quests with different quest_id values", async () => {
-    const questIdTwo = new anchor.BN(2);
-    const { quest: questOne } = {
-      quest: deriveQuestPda(new anchor.BN(1))[0],
-    };
-    const { quest: questTwo } = await createQuest(
-      questIdTwo,
-      "https://lootloop.example/quests/2.json",
-      new anchor.BN(0.1 * LAMPORTS_PER_SOL)
-    );
-
-    expect(questOne.toString()).to.not.equal(questTwo.toString());
-
-    const questOneAccount = await program.account.quest.fetch(questOne);
-    const questTwoAccount = await program.account.quest.fetch(questTwo);
-
-    expect(questOneAccount.questId.toNumber()).to.equal(1);
-    expect(questTwoAccount.questId.toNumber()).to.equal(2);
+  it("rejects create_quest when initial_reward_funding is not a reward multiple", async () => {
+    try {
+      await createQuest({
+        initialRewardFunding: REWARD.mul(new anchor.BN(3)).add(new anchor.BN(1)),
+      });
+      expect.fail("createQuest should reject non-multiple reward funding");
+    } catch (err) {
+      expectAnchorError(err, "RewardFundingNotMultipleOfReward");
+    }
   });
 
-  it("lets a user submit proof for an open Quest", async () => {
-    const { quest } = await createQuest(
-      new anchor.BN(3),
-      "https://lootloop.example/quests/3.json",
-      new anchor.BN(0.1 * LAMPORTS_PER_SOL)
+  it("rejects create_quest when deposit_amount is not a reward multiple", async () => {
+    try {
+      await createQuest({
+        depositAmount: REWARD.mul(new anchor.BN(3)).add(new anchor.BN(1)),
+      });
+      expect.fail("createQuest should reject non-multiple deposit funding");
+    } catch (err) {
+      expectAnchorError(err, "DepositNotMultipleOfReward");
+    }
+  });
+
+  it("collects a 2% protocol fee during create_quest", async () => {
+    const [feeVault] = deriveFeeVaultPda();
+    const before = await provider.connection.getBalance(feeVault);
+    const funding = REWARD.mul(new anchor.BN(10));
+    await createQuest({ initialRewardFunding: funding });
+    const after = await provider.connection.getBalance(feeVault);
+    expect(after - before).to.equal(
+      funding.mul(PLATFORM_FEE_BPS).div(BPS_DENOMINATOR).toNumber()
     );
-    const proofUri = "https://github.com/lootloop/demo/pull/1";
+  });
 
-    const { submission, signature } = await submitProof(quest, proofUri);
-    console.log("✅ Submit proof tx:", signature);
-
+  it("submits proof using a chain-enforced submission index", async () => {
+    const { quest } = await createQuest();
+    const { submission, index } = await submitProof(quest, submitterA);
     const submissionAccount = await program.account.submission.fetch(submission);
-    expect(submissionAccount.quest.toString()).to.equal(quest.toString());
+    const questAccount = await program.account.quest.fetch(quest);
+
+    expect(index.toNumber()).to.equal(0);
+    expect(submissionAccount.submissionIndex.toNumber()).to.equal(0);
     expect(submissionAccount.submitter.toString()).to.equal(
-      publisher.publicKey.toString()
+      submitterA.publicKey.toString()
     );
     expect(submissionAccount.status).to.deep.equal({ pending: {} });
-    expect(submissionAccount.proofUri).to.equal(proofUri);
-    expect(submissionAccount.submittedAt.toNumber()).to.be.greaterThan(0);
-    expect(submissionAccount.reviewedAt.toNumber()).to.equal(0);
+    expect(questAccount.pendingCount).to.equal(1);
+    expect(questAccount.nextSubmissionIndex.toNumber()).to.equal(1);
+  });
 
+  it("prevents submissions when the pending queue is full", async () => {
+    const { quest } = await createQuest({ queueMax: 1 });
+    await submitProof(quest, submitterA);
+
+    try {
+      await submitProof(quest, submitterB);
+      expect.fail("submitProof should reject a full queue");
+    } catch (err) {
+      expectAnchorError(err, "QueueFull");
+    }
+  });
+
+  it("prevents OneTime users from completing twice", async () => {
+    const { quest } = await createQuest();
+    const { submission } = await submitProof(quest, submitterA);
+    await approveSubmission(quest, submission, submitterA.publicKey);
+
+    try {
+      await submitProof(quest, submitterA);
+      expect.fail("submitProof should reject completed one-time users");
+    } catch (err) {
+      expectAnchorError(err, "OneTimeAlreadySubmitted");
+    }
+  });
+
+  it("prevents Recurring duplicate submissions in the same cycle", async () => {
+    const { quest } = await createQuest({
+      mode: recurring,
+      periodSeconds: PERIOD,
+    });
+    await submitProof(quest, submitterA);
+
+    try {
+      await submitProof(quest, submitterA);
+      expect.fail("submitProof should reject duplicate cycle submissions");
+    } catch (err) {
+      expectAnchorError(err, "CycleAlreadySubmitted");
+    }
+  });
+
+  it("Recurring submit_proof has no cycle_index argument and stores the chain-computed current cycle", async () => {
+    const submitIx = (program.idl.instructions as any[]).find(
+      (ix) => ix.name === "submit_proof" || ix.name === "submitProof"
+    );
+    expect(submitIx.args).to.have.length(1);
+    expect(
+      submitIx.args.some((arg: any) =>
+        ["cycle_index", "cycleIndex"].includes(arg.name)
+      )
+    ).to.equal(false);
+
+    const { quest } = await createQuest({
+      mode: recurring,
+      periodSeconds: FAST_PERIOD,
+    });
+    const { submission } = await submitProof(quest, submitterA);
     const questAccount = await program.account.quest.fetch(quest);
-    expect(questAccount.submissionCount.toNumber()).to.equal(1);
-  });
-
-  it("fails when proof_uri is too long", async () => {
-    const { quest } = await createQuest(
-      new anchor.BN(4),
-      "https://lootloop.example/quests/4.json",
-      new anchor.BN(0.1 * LAMPORTS_PER_SOL)
-    );
-
-    try {
-      await submitProof(quest, "x".repeat(201));
-      expect.fail("submitProof should reject oversized proof_uri");
-    } catch (err) {
-      expectAnchorError(err, "ProofUriTooLong");
-    }
-  });
-
-  it("fails when the same user submits proof twice for the same Quest", async () => {
-    const { quest } = await createQuest(
-      new anchor.BN(5),
-      "https://lootloop.example/quests/5.json",
-      new anchor.BN(0.1 * LAMPORTS_PER_SOL)
-    );
-
-    await submitProof(quest, "https://github.com/lootloop/demo/pull/first");
-
-    try {
-      await submitProof(quest, "https://github.com/lootloop/demo/pull/second");
-      expect.fail("submitProof should reject duplicate submissions");
-    } catch (err) {
-      expect(err).to.be.instanceOf(Error);
-    }
-  });
-
-  it("lets the reviewer approve a pending submission", async () => {
-    const { quest } = await createQuest(
-      new anchor.BN(6),
-      "https://lootloop.example/quests/6.json",
-      new anchor.BN(0.1 * LAMPORTS_PER_SOL)
-    );
-    const { submission } = await submitProof(
-      quest,
-      "https://github.com/lootloop/demo/pull/approve"
-    );
-
-    const { signature } = await approveSubmission(quest, submission);
-    console.log("✅ Approve submission tx:", signature);
-
     const submissionAccount = await program.account.submission.fetch(submission);
-    expect(submissionAccount.status).to.deep.equal({ approved: {} });
-    expect(submissionAccount.reviewedAt.toNumber()).to.be.greaterThan(0);
+    const expectedCycle = submissionAccount.submittedAt
+      .sub(questAccount.startAt)
+      .div(questAccount.periodSeconds);
 
-    const questAccount = await program.account.quest.fetch(quest);
-    expect(questAccount.status).to.deep.equal({ approved: {} });
-    expect(questAccount.approvedSubmitter?.toString()).to.equal(
-      publisher.publicKey.toString()
+    expect(submissionAccount.cycleIndex.toString()).to.equal(
+      expectedCycle.toString()
     );
   });
 
-  it("fails when a non-reviewer and non-publisher approves a submission", async () => {
-    const { quest } = await createQuest(
-      new anchor.BN(7),
-      "https://lootloop.example/quests/7.json",
-      new anchor.BN(0.1 * LAMPORTS_PER_SOL)
-    );
-    const { submission } = await submitProof(
+  it("marks Recurring current cycle Pending on submit and releases it on reject", async () => {
+    const { quest } = await createQuest({
+      mode: recurring,
+      periodSeconds: PERIOD,
+    });
+    const first = await submitProof(quest, submitterA);
+    let submissionAccount = await program.account.submission.fetch(first.submission);
+    let progress = await program.account.userProgress.fetch(first.userProgress);
+    expect(cycleState(progress, submissionAccount.cycleIndex)).to.equal(1);
+
+    await rejectSubmission(quest, first.submission, submitterA.publicKey);
+    progress = await program.account.userProgress.fetch(first.userProgress);
+    expect(cycleState(progress, submissionAccount.cycleIndex)).to.equal(0);
+
+    const second = await submitProof(quest, submitterA);
+    submissionAccount = await program.account.submission.fetch(second.submission);
+    progress = await program.account.userProgress.fetch(second.userProgress);
+    expect(second.index.toNumber()).to.equal(1);
+    expect(cycleState(progress, submissionAccount.cycleIndex)).to.equal(1);
+  });
+
+  it("marks Recurring current cycle Approved after full payment", async () => {
+    const { quest } = await createQuest({
+      mode: recurring,
+      periodSeconds: PERIOD,
+    });
+    const { submission, userProgress } = await submitProof(quest, submitterA);
+    const submissionAccount = await program.account.submission.fetch(submission);
+
+    await approveSubmission(quest, submission, submitterA.publicKey);
+
+    const progress = await program.account.userProgress.fetch(userProgress);
+    expect(cycleState(progress, submissionAccount.cycleIndex)).to.equal(2);
+  });
+
+  it("allows Recurring users to submit again after the current cycle advances", async function () {
+    this.timeout(20_000);
+    const { quest } = await createQuest({
+      mode: recurring,
+      periodSeconds: FAST_PERIOD,
+      initialRewardFunding: REWARD.mul(new anchor.BN(5)),
+    });
+    const first = await submitProof(quest, submitterA);
+    const firstAccount = await program.account.submission.fetch(first.submission);
+    await approveSubmission(quest, first.submission, submitterA.publicKey);
+
+    const second = await submitProofAfterCycleAdvance(
       quest,
-      "https://github.com/lootloop/demo/pull/unauthorized"
+      submitterA,
+      firstAccount.cycleIndex
     );
-    const unauthorized = anchor.web3.Keypair.generate();
+
+    expect(second.index.toNumber()).to.equal(1);
+  });
+
+  it("keeps the current Recurring cycle protected after the 32-cycle window rolls", async function () {
+    this.timeout(80_000);
+    const { quest } = await createQuest({
+      mode: recurring,
+      periodSeconds: FAST_PERIOD,
+      initialRewardFunding: REWARD.mul(new anchor.BN(50)),
+      depositAmount: REWARD.mul(new anchor.BN(50)),
+      queueMax: 2,
+    });
+
+    let firstCycle: anchor.BN | null = null;
+    let previousCycle = new anchor.BN(0);
+    let lastCycle = new anchor.BN(0);
+    let userProgress: PublicKey | null = null;
+
+    for (let idx = 0; idx < RECENT_CYCLE_WINDOW + 1; idx += 1) {
+      const submitted =
+        idx === 0
+          ? await submitProof(quest, submitterA)
+          : await submitProofAfterCycleAdvance(quest, submitterA, previousCycle);
+      userProgress = submitted.userProgress;
+      const submissionAccount: any =
+        "submissionAccount" in submitted
+          ? submitted.submissionAccount
+          : await program.account.submission.fetch(submitted.submission);
+      if (idx === 0) {
+        firstCycle = submissionAccount.cycleIndex;
+      } else {
+        expect(submissionAccount.cycleIndex.gt(previousCycle)).to.equal(true);
+      }
+      previousCycle = submissionAccount.cycleIndex;
+      lastCycle = submissionAccount.cycleIndex;
+      if (idx < RECENT_CYCLE_WINDOW) {
+        await approveSubmission(quest, submitted.submission, submitterA.publicKey);
+      }
+    }
+
+    expect(userProgress).to.not.equal(null);
+    const progress = await program.account.userProgress.fetch(userProgress!);
+    expect(firstCycle).to.not.equal(null);
+    expect(cycleState(progress, firstCycle!)).to.equal(0);
+    expect(cycleState(progress, lastCycle)).to.equal(1);
 
     try {
-      await approveSubmission(quest, submission, unauthorized);
+      await submitProof(quest, submitterA);
+      expect.fail("submitProof should reject current-cycle pending duplicates after window rollover");
+    } catch (err) {
+      expectAnchorError(err, "CycleAlreadySubmitted");
+    }
+  });
+
+  it("requires FIFO review order", async () => {
+    const { quest } = await createQuest();
+    await submitProof(quest, submitterA);
+    const second = await submitProof(quest, submitterB);
+
+    try {
+      await approveSubmission(quest, second.submission, submitterB.publicKey);
+      expect.fail("approveSubmission should reject out-of-order review");
+    } catch (err) {
+      expectAnchorError(err, "InvalidReviewOrder");
+    }
+  });
+
+  it("rejects auto_approve_submission on Manual quests", async () => {
+    const { quest } = await createQuest();
+    const { submission } = await submitProof(quest, submitterA);
+
+    try {
+      await autoApproveSubmission(quest, submission);
+      expect.fail("autoApproveSubmission should reject Manual quests");
+    } catch (err) {
+      expectAnchorError(err, "InvalidReviewMode");
+    }
+  });
+
+  it("rejects manual approve_submission on AutoVerified quests", async () => {
+    const { quest } = await createQuest({
+      reviewMode: autoVerified,
+      templateConfigHash: validTemplateHash,
+      verificationSchemaUri: "https://lootloop.example/schema/auto.json",
+      authorizedVerifier: verifierKeypair.publicKey,
+    });
+    const { submission } = await submitProof(quest, submitterA);
+
+    try {
+      await approveSubmission(quest, submission, submitterA.publicKey);
+      expect.fail("approveSubmission should reject AutoVerified quests");
+    } catch (err) {
+      expectAnchorError(err, "InvalidReviewMode");
+    }
+  });
+
+  it("auto_approve_submission requires FIFO review order", async () => {
+    const { quest } = await createQuest({
+      reviewMode: autoVerified,
+      templateConfigHash: validTemplateHash,
+      verificationSchemaUri: "https://lootloop.example/schema/auto.json",
+      authorizedVerifier: verifierKeypair.publicKey,
+    });
+    await submitProof(quest, submitterA);
+    const second = await submitProof(quest, submitterB);
+
+    try {
+      await autoApproveSubmission(quest, second.submission);
+      expect.fail("autoApproveSubmission should reject out-of-order review");
+    } catch (err) {
+      expectAnchorError(err, "InvalidReviewOrder");
+    }
+  });
+
+  it("auto_approve_submission verifies the authorized verifier signature and pays reward", async () => {
+    const { quest, rewardPool } = await createQuest({
+      reviewMode: autoVerified,
+      templateConfigHash: validTemplateHash,
+      verificationSchemaUri: "https://lootloop.example/schema/auto.json",
+      authorizedVerifier: verifierKeypair.publicKey,
+    });
+    const { submission } = await submitProof(quest, submitterA);
+    const before = await provider.connection.getBalance(submitterA.publicKey);
+
+    await autoApproveSubmission(quest, submission);
+
+    const after = await provider.connection.getBalance(submitterA.publicKey);
+    const submissionAccount = await program.account.submission.fetch(submission);
+    const questAccount = await program.account.quest.fetch(quest);
+    expect(after - before).to.equal(REWARD.toNumber());
+    expect(submissionAccount.status).to.deep.equal({ approved: {} });
+    expect(submissionAccount.paidFromRewardPool.toNumber()).to.equal(REWARD.toNumber());
+    expect(questAccount.totalApproved.toNumber()).to.equal(1);
+    expect(await provider.connection.getBalance(rewardPool)).to.equal(
+      REWARD.mul(new anchor.BN(2)).toNumber()
+    );
+  });
+
+  it("auto_approve_submission rejects a signature from the wrong verifier", async () => {
+    const { quest } = await createQuest({
+      reviewMode: autoVerified,
+      templateConfigHash: validTemplateHash,
+      verificationSchemaUri: "https://lootloop.example/schema/auto.json",
+      authorizedVerifier: verifierKeypair.publicKey,
+    });
+    const { submission } = await submitProof(quest, submitterA);
+
+    try {
+      await autoApproveSubmission(quest, submission, wrongVerifierKeypair);
+      expect.fail("autoApproveSubmission should reject wrong verifier");
+    } catch (err) {
+      expectAnchorError(err, "InvalidVerifierSignature");
+    }
+  });
+
+  it("auto_approve_submission rejects verification results bound to the wrong context", async () => {
+    const { quest } = await createQuest({
+      reviewMode: autoVerified,
+      templateConfigHash: validTemplateHash,
+      verificationSchemaUri: "https://lootloop.example/schema/auto.json",
+      authorizedVerifier: verifierKeypair.publicKey,
+    });
+    const cases = [
+      { quest: anchor.web3.Keypair.generate().publicKey },
+      { submitter: submitterB.publicKey },
+      { submissionIndex: new anchor.BN(99) },
+      { cycleIndex: new anchor.BN(99) },
+      { templateConfigHash: Array.from({ length: 32 }, (_, idx) => 99 - idx) },
+    ];
+
+    for (const override of cases) {
+      const submitted = await submitProof(quest, submitterA);
+      await rejectSubmission(quest, submitted.submission, submitterA.publicKey);
+      const retry = await submitProof(quest, submitterA);
+      try {
+        await autoApproveSubmission(quest, retry.submission, verifierKeypair, override);
+        expect.fail("autoApproveSubmission should reject mismatched context");
+      } catch (err) {
+        expectAnchorError(err, "InvalidVerificationResult");
+      }
+      await rejectSubmission(quest, retry.submission, submitterA.publicKey);
+    }
+  });
+
+  it("auto_approve_submission rejects failed or expired verification results", async () => {
+    const { quest } = await createQuest({
+      reviewMode: autoVerified,
+      templateConfigHash: validTemplateHash,
+      verificationSchemaUri: "https://lootloop.example/schema/auto.json",
+      authorizedVerifier: verifierKeypair.publicKey,
+    });
+    const failed = await submitProof(quest, submitterA);
+    try {
+      await autoApproveSubmission(quest, failed.submission, verifierKeypair, {
+        passed: false,
+      });
+      expect.fail("autoApproveSubmission should reject passed=false");
+    } catch (err) {
+      expectAnchorError(err, "InvalidVerificationResult");
+    }
+    await rejectSubmission(quest, failed.submission, submitterA.publicKey);
+
+    const expired = await submitProof(quest, submitterA);
+    try {
+      await autoApproveSubmission(quest, expired.submission, verifierKeypair, {
+        expiresAt: new anchor.BN(1),
+      });
+      expect.fail("autoApproveSubmission should reject expired results");
+    } catch (err) {
+      expectAnchorError(err, "VerificationExpired");
+    }
+  });
+
+  it("auto_approve_submission uses deposit pool and enters Closing when reward_pool is depleted", async () => {
+    const { quest, rewardPool, depositPool } = await createQuest({
+      reviewMode: autoVerified,
+      templateConfigHash: validTemplateHash,
+      verificationSchemaUri: "https://lootloop.example/schema/auto.json",
+      authorizedVerifier: verifierKeypair.publicKey,
+      rewardPerCompletion: BIG_REWARD,
+      initialRewardFunding: BIG_REWARD,
+      queueMax: 2,
+      depositAmount: BIG_REWARD.mul(new anchor.BN(3)),
+    });
+    const first = await submitProof(quest, submitterA);
+    const second = await submitProof(quest, submitterB);
+    await autoApproveSubmission(quest, first.submission);
+    await autoApproveSubmission(quest, second.submission);
+
+    const questAccount = await program.account.quest.fetch(quest);
+    const secondAccount = await program.account.submission.fetch(second.submission);
+    expect(questAccount.status).to.deep.equal({ closing: {} });
+    expect(questAccount.closingReason).to.deep.equal({ rewardPoolDepleted: {} });
+    expect(secondAccount.paidFromRewardPool.toNumber()).to.equal(0);
+    expect(secondAccount.paidFromDepositPool.toNumber()).to.equal(BIG_REWARD.toNumber());
+    expect(await provider.connection.getBalance(rewardPool)).to.equal(0);
+    expect(await provider.connection.getBalance(depositPool)).to.equal(
+      BIG_REWARD.mul(new anchor.BN(2)).toNumber()
+    );
+  });
+
+  it("reject_submission releases AutoVerified pending submissions", async () => {
+    const { quest } = await createQuest({
+      reviewMode: autoVerified,
+      templateConfigHash: validTemplateHash,
+      verificationSchemaUri: "https://lootloop.example/schema/auto.json",
+      authorizedVerifier: verifierKeypair.publicKey,
+    });
+    const first = await submitProof(quest, submitterA);
+    await rejectSubmission(quest, first.submission, submitterA.publicKey);
+    const second = await submitProof(quest, submitterA);
+    expect(second.index.toNumber()).to.equal(1);
+    const questAccount = await program.account.quest.fetch(quest);
+    expect(questAccount.pendingCount).to.equal(1);
+  });
+
+  it("automatically pays the submitter from the reward pool on approval", async () => {
+    const { quest, rewardPool } = await createQuest();
+    const { submission } = await submitProof(quest, submitterA);
+    const before = await provider.connection.getBalance(submitterA.publicKey);
+
+    await approveSubmission(quest, submission, submitterA.publicKey);
+
+    const after = await provider.connection.getBalance(submitterA.publicKey);
+    const submissionAccount = await program.account.submission.fetch(submission);
+    expect(after - before).to.equal(REWARD.toNumber());
+    expect(submissionAccount.status).to.deep.equal({ approved: {} });
+    expect(submissionAccount.paidFromRewardPool.toNumber()).to.equal(
+      REWARD.toNumber()
+    );
+    expect(await provider.connection.getBalance(rewardPool)).to.equal(
+      REWARD.mul(new anchor.BN(2)).toNumber()
+    );
+  });
+
+  it("uses the deposit pool when the reward pool cannot pay a full reward and enters Closing", async () => {
+    const { quest, rewardPool, depositPool } = await createQuest({
+      rewardPerCompletion: BIG_REWARD,
+      initialRewardFunding: BIG_REWARD,
+      queueMax: 2,
+      depositAmount: BIG_REWARD.mul(new anchor.BN(3)),
+    });
+    const first = await submitProof(quest, submitterA);
+    const second = await submitProof(quest, submitterB);
+
+    await approveSubmission(quest, first.submission, submitterA.publicKey);
+    await approveSubmission(quest, second.submission, submitterB.publicKey);
+
+    const account = await program.account.quest.fetch(quest);
+    const submissionAccount = await program.account.submission.fetch(second.submission);
+    expect(account.status).to.deep.equal({ closing: {} });
+    expect(account.closingReason).to.deep.equal({ rewardPoolDepleted: {} });
+    expect(submissionAccount.status).to.deep.equal({ approved: {} });
+    expect(submissionAccount.paidFromRewardPool.toNumber()).to.equal(0);
+    expect(submissionAccount.paidFromDepositPool.toNumber()).to.equal(
+      BIG_REWARD.toNumber()
+    );
+    expect(await provider.connection.getBalance(rewardPool)).to.equal(0);
+    expect(await provider.connection.getBalance(depositPool)).to.equal(
+      BIG_REWARD.mul(new anchor.BN(2)).toNumber()
+    );
+  });
+
+  it("pays approved Closing submissions only from the deposit pool", async () => {
+    const { quest } = await createQuest({
+      rewardPerCompletion: BIG_REWARD,
+      initialRewardFunding: BIG_REWARD,
+      queueMax: 3,
+      depositAmount: BIG_REWARD.mul(new anchor.BN(4)),
+    });
+    const first = await submitProof(quest, submitterA);
+    const second = await submitProof(quest, submitterB);
+    const third = await submitProof(quest, submitterC);
+
+    await approveSubmission(quest, first.submission, submitterA.publicKey);
+    await approveSubmission(quest, second.submission, submitterB.publicKey);
+    await approveSubmission(quest, third.submission, submitterC.publicKey);
+
+    const thirdAccount = await program.account.submission.fetch(third.submission);
+    expect(thirdAccount.status).to.deep.equal({ approved: {} });
+    expect(thirdAccount.paidFromRewardPool.toNumber()).to.equal(0);
+    expect(thirdAccount.paidFromDepositPool.toNumber()).to.equal(
+      BIG_REWARD.toNumber()
+    );
+  });
+
+  it("reject_submission releases pending_count and advances next_review_index", async () => {
+    const { quest } = await createQuest();
+    const { submission } = await submitProof(quest, submitterA);
+
+    await rejectSubmission(quest, submission, submitterA.publicKey);
+
+    const questAccount = await program.account.quest.fetch(quest);
+    const submissionAccount = await program.account.submission.fetch(submission);
+    expect(submissionAccount.status).to.deep.equal({ rejected: {} });
+    expect(questAccount.pendingCount).to.equal(0);
+    expect(questAccount.nextReviewIndex.toNumber()).to.equal(1);
+    expect(questAccount.totalRejected.toNumber()).to.equal(1);
+  });
+
+  it("prevents new submissions after reward shortage moves quest to Closing", async () => {
+    const { quest } = await createQuest({
+      rewardPerCompletion: BIG_REWARD,
+      initialRewardFunding: BIG_REWARD,
+      queueMax: 2,
+      depositAmount: BIG_REWARD.mul(new anchor.BN(3)),
+    });
+    const first = await submitProof(quest, submitterA);
+    const second = await submitProof(quest, submitterB);
+    await approveSubmission(quest, first.submission, submitterA.publicKey);
+    await approveSubmission(quest, second.submission, submitterB.publicKey);
+
+    try {
+      await submitProof(quest, submitterC);
+      expect.fail("submitProof should reject Closing quests");
+    } catch (err) {
+      expectAnchorError(err, "InvalidQuestStatus");
+    }
+  });
+
+  it("early close stops new submissions and sends remaining pools to public goods", async () => {
+    const { quest, rewardPool, depositPool, publicGoodsPool, feeVault } = await createQuest();
+    const publicBefore = await provider.connection.getBalance(publicGoodsPool);
+    const feeBefore = await provider.connection.getBalance(feeVault);
+    const rewardBefore = await provider.connection.getBalance(rewardPool);
+    const depositBefore = await provider.connection.getBalance(depositPool);
+
+    await closeQuest(quest);
+
+    const account = await program.account.quest.fetch(quest);
+    const cancellationFee = Math.floor(
+      (depositBefore * CANCEL_FEE_BPS.toNumber()) / BPS_DENOMINATOR.toNumber()
+    );
+    expect(account.status).to.deep.equal({ closed: {} });
+    expect(account.closingReason).to.deep.equal({ earlyManual: {} });
+    expect(await provider.connection.getBalance(rewardPool)).to.equal(0);
+    expect(await provider.connection.getBalance(depositPool)).to.equal(0);
+    expect(await provider.connection.getBalance(feeVault)).to.equal(
+      feeBefore + cancellationFee
+    );
+    expect(await provider.connection.getBalance(publicGoodsPool)).to.equal(
+      publicBefore + rewardBefore + depositBefore - cancellationFee
+    );
+  });
+
+  it("early close with pending enters Closing and settle waits for pending_count zero", async () => {
+    const { quest } = await createQuest();
+    const { submission } = await submitProof(quest, submitterA);
+
+    await closeQuest(quest);
+    let account = await program.account.quest.fetch(quest);
+    expect(account.status).to.deep.equal({ closing: {} });
+
+    try {
+      await settleQuest(quest);
+      expect.fail("settleQuest should reject pending submissions");
+    } catch (err) {
+      expectAnchorError(err, "PendingSubmissionsRemaining");
+    }
+
+    await rejectSubmission(quest, submission, submitterA.publicKey);
+    await settleQuest(quest);
+    account = await program.account.quest.fetch(quest);
+    expect(account.status).to.deep.equal({ closed: {} });
+  });
+
+  it("fund_quest adds reward funding, deposit, extension, and 2% fee", async () => {
+    const { quest, rewardPool, depositPool, feeVault } = await createQuest();
+    const rewardBefore = await provider.connection.getBalance(rewardPool);
+    const depositBefore = await provider.connection.getBalance(depositPool);
+    const feeBefore = await provider.connection.getBalance(feeVault);
+    const accountBefore = await program.account.quest.fetch(quest);
+
+    await fundQuest(quest, REWARD, REWARD, new anchor.BN(60));
+
+    const accountAfter = await program.account.quest.fetch(quest);
+    expect(await provider.connection.getBalance(rewardPool)).to.equal(
+      rewardBefore + REWARD.toNumber()
+    );
+    expect(await provider.connection.getBalance(depositPool)).to.equal(
+      depositBefore + REWARD.toNumber()
+    );
+    expect(await provider.connection.getBalance(feeVault)).to.equal(
+      feeBefore + REWARD.mul(PLATFORM_FEE_BPS).div(BPS_DENOMINATOR).toNumber()
+    );
+    expect(accountAfter.expiresAt.sub(accountBefore.expiresAt).toNumber()).to.equal(
+      60
+    );
+  });
+
+  it("rejects fund_quest when reward funding is not a reward multiple", async () => {
+    const { quest } = await createQuest();
+
+    try {
+      await fundQuest(quest, REWARD.add(new anchor.BN(1)));
+      expect.fail("fundQuest should reject non-multiple reward funding");
+    } catch (err) {
+      expectAnchorError(err, "RewardFundingNotMultipleOfReward");
+    }
+  });
+
+  it("rejects fund_quest when additional deposit is not a reward multiple", async () => {
+    const { quest } = await createQuest();
+
+    try {
+      await fundQuest(quest, new anchor.BN(0), REWARD.add(new anchor.BN(1)));
+      expect.fail("fundQuest should reject non-multiple additional deposit");
+    } catch (err) {
+      expectAnchorError(err, "DepositNotMultipleOfReward");
+    }
+  });
+
+  it("rejects fund_quest after a quest enters Closing", async () => {
+    const { quest } = await createQuest({
+      rewardPerCompletion: BIG_REWARD,
+      initialRewardFunding: BIG_REWARD,
+      queueMax: 2,
+      depositAmount: BIG_REWARD.mul(new anchor.BN(3)),
+    });
+    const first = await submitProof(quest, submitterA);
+    const second = await submitProof(quest, submitterB);
+    await approveSubmission(quest, first.submission, submitterA.publicKey);
+    await approveSubmission(quest, second.submission, submitterB.publicKey);
+
+    try {
+      await fundQuest(quest, BIG_REWARD);
+      expect.fail("fundQuest should reject Closing quests");
+    } catch (err) {
+      expectAnchorError(err, "InvalidQuestStatus");
+    }
+  });
+
+  it("settles reward-pool-depleted Closing as an early close", async () => {
+    const { quest, rewardPool, depositPool, publicGoodsPool, feeVault } =
+      await createQuest({
+        rewardPerCompletion: BIG_REWARD,
+        initialRewardFunding: BIG_REWARD,
+        queueMax: 2,
+        depositAmount: BIG_REWARD.mul(new anchor.BN(3)),
+      });
+    const first = await submitProof(quest, submitterA);
+    const second = await submitProof(quest, submitterB);
+    await approveSubmission(quest, first.submission, submitterA.publicKey);
+    await approveSubmission(quest, second.submission, submitterB.publicKey);
+
+    await transferLamports(rewardPool, REWARD.toNumber());
+    const publicBefore = await provider.connection.getBalance(publicGoodsPool);
+    const feeBefore = await provider.connection.getBalance(feeVault);
+    const rewardBefore = await provider.connection.getBalance(rewardPool);
+    const depositBefore = await provider.connection.getBalance(depositPool);
+
+    await settleQuest(quest);
+
+    const cancellationFee = Math.floor(
+      (depositBefore * CANCEL_FEE_BPS.toNumber()) / BPS_DENOMINATOR.toNumber()
+    );
+    const account = await program.account.quest.fetch(quest);
+    expect(account.status).to.deep.equal({ closed: {} });
+    expect(account.closingReason).to.deep.equal({ rewardPoolDepleted: {} });
+    expect(await provider.connection.getBalance(rewardPool)).to.equal(0);
+    expect(await provider.connection.getBalance(depositPool)).to.equal(0);
+    expect(await provider.connection.getBalance(feeVault)).to.equal(
+      feeBefore + cancellationFee
+    );
+    expect(await provider.connection.getBalance(publicGoodsPool)).to.equal(
+      publicBefore + rewardBefore + depositBefore - cancellationFee
+    );
+  });
+
+  it("rejects fund/submit/approve/reject/close after Closed", async () => {
+    const { quest } = await createQuest();
+    await closeQuest(quest);
+
+    for (const action of [
+      () => fundQuest(quest, REWARD),
+      () => submitProof(quest, submitterA),
+      async () => {
+        const [submission] = deriveSubmissionPda(quest, new anchor.BN(0));
+        await approveSubmission(quest, submission, submitterA.publicKey);
+      },
+      async () => {
+        const [submission] = deriveSubmissionPda(quest, new anchor.BN(0));
+        await rejectSubmission(quest, submission, submitterA.publicKey);
+      },
+      () => closeQuest(quest),
+    ]) {
+      try {
+        await action();
+        expect.fail("closed quest action should fail");
+      } catch (err) {
+        expect(String(err)).to.not.equal("");
+      }
+    }
+  });
+
+  it("rejects unauthorized reviewer", async () => {
+    const { quest } = await createQuest();
+    const { submission } = await submitProof(quest, submitterA);
+
+    try {
+      await approveSubmission(
+        quest,
+        submission,
+        submitterA.publicKey,
+        strangerKeypair
+      );
       expect.fail("approveSubmission should reject unauthorized reviewers");
     } catch (err) {
       expectAnchorError(err, "Unauthorized");
     }
   });
 
-  it("fails when approving the same submission twice", async () => {
-    const { quest } = await createQuest(
-      new anchor.BN(8),
-      "https://lootloop.example/quests/8.json",
-      new anchor.BN(0.1 * LAMPORTS_PER_SOL)
-    );
-    const { submission } = await submitProof(
-      quest,
-      "https://github.com/lootloop/demo/pull/double-approve"
-    );
+  it("allows rejected OneTime users to resubmit with a new index", async () => {
+    const { quest } = await createQuest();
+    const first = await submitProof(quest, submitterA);
+    await rejectSubmission(quest, first.submission, submitterA.publicKey);
 
-    await approveSubmission(quest, submission);
+    const second = await submitProof(quest, submitterA);
+    expect(second.index.toNumber()).to.equal(1);
+  });
+
+  it("prevents Recurring users from resubmitting in a cycle after approval", async () => {
+    const { quest } = await createQuest({
+      mode: recurring,
+      periodSeconds: PERIOD,
+    });
+    const { submission } = await submitProof(quest, submitterA);
+    await approveSubmission(quest, submission, submitterA.publicKey);
 
     try {
-      await approveSubmission(quest, submission);
-      expect.fail("approveSubmission should reject already approved submissions");
+      await submitProof(quest, submitterA);
+      expect.fail("submitProof should reject approved cycle resubmission");
     } catch (err) {
-      expectAnchorError(err, "InvalidSubmissionStatus");
+      expectAnchorError(err, "CycleAlreadySubmitted");
     }
   });
 
-  it("fails when approving a submission that belongs to another Quest", async () => {
-    const { quest: sourceQuest } = await createQuest(
-      new anchor.BN(9),
-      "https://lootloop.example/quests/9.json",
-      new anchor.BN(0.1 * LAMPORTS_PER_SOL)
-    );
-    const { quest: otherQuest } = await createQuest(
-      new anchor.BN(10),
-      "https://lootloop.example/quests/10.json",
-      new anchor.BN(0.1 * LAMPORTS_PER_SOL)
-    );
-    const { submission } = await submitProof(
-      sourceQuest,
-      "https://github.com/lootloop/demo/pull/wrong-quest"
-    );
+  it("can close an expired quest and refund reward/deposit to publisher", async function () {
+    this.timeout(90_000);
+    const { quest, rewardPool, depositPool } = await createQuest();
+    await sleep(62_000);
 
-    try {
-      await approveSubmission(otherQuest, submission);
-      expect.fail("approveSubmission should reject submissions from another Quest");
-    } catch (err) {
-      expectAnchorError(err, "InvalidSubmissionQuest");
-    }
-  });
-
-  it("lets the approved submitter claim the reward", async () => {
-    const rewardAmount = new anchor.BN(0.1 * LAMPORTS_PER_SOL);
-    const { quest } = await createQuest(
-      new anchor.BN(11),
-      "https://lootloop.example/quests/11.json",
-      rewardAmount
-    );
-    const { submission } = await submitProof(
-      quest,
-      "https://github.com/lootloop/demo/pull/claim"
-    );
-    await approveSubmission(quest, submission);
-
-    const balanceBefore = await provider.connection.getBalance(
-      publisher.publicKey
-    );
-    const { vault, signature } = await claimReward(quest, submission);
-    console.log("✅ Claim reward tx:", signature);
-    const balanceAfter = await provider.connection.getBalance(publisher.publicKey);
-
-    expect(balanceAfter).to.be.greaterThan(
-      balanceBefore + rewardAmount.toNumber() - 0.01 * LAMPORTS_PER_SOL
-    );
-    expect(await provider.connection.getBalance(vault)).to.equal(0);
-
-    const questAccount = await program.account.quest.fetch(quest);
-    expect(questAccount.rewardClaimed).to.equal(true);
-    expect(questAccount.status).to.deep.equal({ completed: {} });
-  });
-
-  it("fails when claiming before approval", async () => {
-    const { quest } = await createQuest(
-      new anchor.BN(12),
-      "https://lootloop.example/quests/12.json",
-      new anchor.BN(0.1 * LAMPORTS_PER_SOL)
-    );
-    const { submission } = await submitProof(
-      quest,
-      "https://github.com/lootloop/demo/pull/unapproved"
-    );
-
-    try {
-      await claimReward(quest, submission);
-      expect.fail("claimReward should reject unapproved submissions");
-    } catch (err) {
-      expectAnchorError(err, "InvalidQuestStatus");
-    }
-  });
-
-  it("fails when a non-approved submitter claims the reward", async () => {
-    const { quest } = await createQuest(
-      new anchor.BN(13),
-      "https://lootloop.example/quests/13.json",
-      new anchor.BN(0.1 * LAMPORTS_PER_SOL)
-    );
-    const { submission } = await submitProof(
-      quest,
-      "https://github.com/lootloop/demo/pull/wrong-claimer"
-    );
-    await approveSubmission(quest, submission);
-    const wrongSubmitter = anchor.web3.Keypair.generate();
-
-    try {
-      await claimReward(quest, submission, wrongSubmitter);
-      expect.fail("claimReward should reject non-approved submitters");
-    } catch (err) {
-      expectAnchorError(err, "InvalidSubmitter");
-    }
-  });
-
-  it("fails when claiming the same reward twice", async () => {
-    const { quest } = await createQuest(
-      new anchor.BN(14),
-      "https://lootloop.example/quests/14.json",
-      new anchor.BN(0.1 * LAMPORTS_PER_SOL)
-    );
-    const { submission } = await submitProof(
-      quest,
-      "https://github.com/lootloop/demo/pull/double-claim"
-    );
-    await approveSubmission(quest, submission);
-    await claimReward(quest, submission);
-
-    try {
-      await claimReward(quest, submission);
-      expect.fail("claimReward should reject duplicate claims");
-    } catch (err) {
-      expectAnchorError(err, "InvalidQuestStatus");
-    }
-  });
-
-  it("fails when claiming with a submission that belongs to another Quest", async () => {
-    const { quest: sourceQuest } = await createQuest(
-      new anchor.BN(15),
-      "https://lootloop.example/quests/15.json",
-      new anchor.BN(0.1 * LAMPORTS_PER_SOL)
-    );
-    const { submission: sourceSubmission } = await submitProof(
-      sourceQuest,
-      "https://github.com/lootloop/demo/pull/source-claim"
-    );
-    await approveSubmission(sourceQuest, sourceSubmission);
-
-    const { quest: otherQuest } = await createQuest(
-      new anchor.BN(16),
-      "https://lootloop.example/quests/16.json",
-      new anchor.BN(0.1 * LAMPORTS_PER_SOL)
-    );
-    const { submission: otherSubmission } = await submitProof(
-      otherQuest,
-      "https://github.com/lootloop/demo/pull/other-claim"
-    );
-    await approveSubmission(otherQuest, otherSubmission);
-
-    try {
-      await claimReward(otherQuest, sourceSubmission);
-      expect.fail("claimReward should reject submissions from another Quest");
-    } catch (err) {
-      expectAnchorError(err, "InvalidSubmissionQuest");
-    }
-  });
-
-  it("lets the publisher top up a Quest and extend its deadline", async () => {
-    const initialReward = new anchor.BN(0.1 * LAMPORTS_PER_SOL);
-    const topUpAmount = new anchor.BN(0.05 * LAMPORTS_PER_SOL);
-    const extension = new anchor.BN(30 * 60);
-    const { quest, vault, feeVault } = await createQuest(
-      new anchor.BN(17),
-      "https://lootloop.example/quests/17.json",
-      initialReward
-    );
-    const accountBefore = await program.account.quest.fetch(quest);
-    const vaultBalanceBefore = await provider.connection.getBalance(vault);
-    const feeVaultBalanceBefore = await provider.connection.getBalance(feeVault);
-    const topUpFee = topUpAmount.mul(platformFeeBps).div(bpsDenominator);
-
-    await topUpQuest(quest, topUpAmount, extension);
-
-    const accountAfter = await program.account.quest.fetch(quest);
-    expect(accountAfter.rewardAmount.toNumber()).to.equal(
-      initialReward.add(topUpAmount).toNumber()
-    );
-    expect(accountAfter.totalFundedAmount.toNumber()).to.equal(
-      initialReward.add(topUpAmount).toNumber()
-    );
-    expect(accountAfter.totalFeePaid.toNumber()).to.equal(
-      accountBefore.totalFeePaid.add(topUpFee).toNumber()
-    );
-    expect(accountAfter.expiresAt.toNumber()).to.equal(
-      accountBefore.expiresAt.add(extension).toNumber()
-    );
-    expect(await provider.connection.getBalance(vault)).to.equal(
-      vaultBalanceBefore + topUpAmount.toNumber()
-    );
-    expect(await provider.connection.getBalance(feeVault)).to.equal(
-      feeVaultBalanceBefore + topUpFee.toNumber()
-    );
-  });
-
-  it("fails when a non-publisher tops up a Quest", async () => {
-    const { quest } = await createQuest(
-      new anchor.BN(18),
-      "https://lootloop.example/quests/18.json",
-      new anchor.BN(0.1 * LAMPORTS_PER_SOL)
-    );
-    const unauthorized = anchor.web3.Keypair.generate();
-
-    try {
-      await topUpQuest(quest, minAmount, new anchor.BN(0), unauthorized);
-      expect.fail("topUpQuest should reject non-publishers");
-    } catch (err) {
-      expectAnchorError(err, "Unauthorized");
-    }
-  });
-
-  it("fails when top_up_amount is below the minimum", async () => {
-    const { quest } = await createQuest(
-      new anchor.BN(19),
-      "https://lootloop.example/quests/19.json",
-      new anchor.BN(0.1 * LAMPORTS_PER_SOL)
-    );
-
-    try {
-      await topUpQuest(quest, minAmount.sub(new anchor.BN(1)));
-      expect.fail("topUpQuest should reject top ups below the minimum");
-    } catch (err) {
-      expectAnchorError(err, "InvalidTopUpAmount");
-    }
-  });
-
-  it("fails when topping up an approved Quest", async () => {
-    const { quest } = await createQuest(
-      new anchor.BN(20),
-      "https://lootloop.example/quests/20.json",
-      new anchor.BN(0.1 * LAMPORTS_PER_SOL)
-    );
-    const { submission } = await submitProof(
-      quest,
-      "https://github.com/lootloop/demo/pull/top-up-approved"
-    );
-    await approveSubmission(quest, submission);
-
-    try {
-      await topUpQuest(quest, minAmount);
-      expect.fail("topUpQuest should reject approved quests");
-    } catch (err) {
-      expectAnchorError(err, "CannotTopUpApprovedQuest");
-    }
-  });
-
-  it("lets the publisher cancel before expiry and sends the reward to public goods pool", async () => {
-    const rewardAmount = new anchor.BN(0.1 * LAMPORTS_PER_SOL);
-    const { quest, vault } = await createQuest(
-      new anchor.BN(21),
-      "https://lootloop.example/quests/21.json",
-      rewardAmount
-    );
-    const [publicGoodsPool] = derivePublicGoodsPoolPda();
-    const poolBalanceBefore = await provider.connection.getBalance(publicGoodsPool);
-
-    const { publicGoodsPool: cancelledPool } = await cancelQuest(quest);
-
-    expect(cancelledPool.toString()).to.equal(publicGoodsPool.toString());
-    expect(await provider.connection.getBalance(vault)).to.equal(0);
-    expect(await provider.connection.getBalance(publicGoodsPool)).to.equal(
-      poolBalanceBefore + rewardAmount.toNumber()
-    );
+    const rewardBefore = await provider.connection.getBalance(rewardPool);
+    const depositBefore = await provider.connection.getBalance(depositPool);
+    await closeQuest(quest);
 
     const account = await program.account.quest.fetch(quest);
-    expect(account.status).to.deep.equal({ cancelled: {} });
-    expect(account.cancelledAt.toNumber()).to.be.greaterThan(0);
+    expect(account.status).to.deep.equal({ closed: {} });
+    expect(await provider.connection.getBalance(rewardPool)).to.equal(0);
+    expect(await provider.connection.getBalance(depositPool)).to.equal(0);
+    expect(rewardBefore + depositBefore).to.be.greaterThan(0);
   });
-
-  it("fails when a non-publisher cancels a Quest", async () => {
-    const { quest } = await createQuest(
-      new anchor.BN(22),
-      "https://lootloop.example/quests/22.json",
-      new anchor.BN(0.1 * LAMPORTS_PER_SOL)
-    );
-    const unauthorized = anchor.web3.Keypair.generate();
-
-    try {
-      await cancelQuest(quest, unauthorized);
-      expect.fail("cancelQuest should reject non-publishers");
-    } catch (err) {
-      expectAnchorError(err, "Unauthorized");
-    }
-  });
-
-  it("fails when cancelling an approved Quest", async () => {
-    const { quest } = await createQuest(
-      new anchor.BN(23),
-      "https://lootloop.example/quests/23.json",
-      new anchor.BN(0.1 * LAMPORTS_PER_SOL)
-    );
-    const { submission } = await submitProof(
-      quest,
-      "https://github.com/lootloop/demo/pull/cancel-approved"
-    );
-    await approveSubmission(quest, submission);
-
-    try {
-      await cancelQuest(quest);
-      expect.fail("cancelQuest should reject approved quests");
-    } catch (err) {
-      expectAnchorError(err, "CannotCancelApprovedQuest");
-    }
-  });
-
-  it("fails when cancelling or topping up a completed Quest", async () => {
-    const { quest } = await createQuest(
-      new anchor.BN(24),
-      "https://lootloop.example/quests/24.json",
-      new anchor.BN(0.1 * LAMPORTS_PER_SOL)
-    );
-    const { submission } = await submitProof(
-      quest,
-      "https://github.com/lootloop/demo/pull/completed-terminal"
-    );
-    await approveSubmission(quest, submission);
-    await claimReward(quest, submission);
-
-    try {
-      await cancelQuest(quest);
-      expect.fail("cancelQuest should reject completed quests");
-    } catch (err) {
-      expectAnchorError(err, "QuestAlreadyCompleted");
-    }
-
-    try {
-      await topUpQuest(quest, minAmount);
-      expect.fail("topUpQuest should reject completed quests");
-    } catch (err) {
-      expectAnchorError(err, "QuestAlreadyCompleted");
-    }
-  });
-
-  it("fails when submitting or topping up a cancelled Quest", async () => {
-    const { quest } = await createQuest(
-      new anchor.BN(25),
-      "https://lootloop.example/quests/25.json",
-      new anchor.BN(0.1 * LAMPORTS_PER_SOL)
-    );
-    await cancelQuest(quest);
-
-    try {
-      await submitProof(quest, "https://github.com/lootloop/demo/pull/cancelled");
-      expect.fail("submitProof should reject cancelled quests");
-    } catch (err) {
-      expectAnchorError(err, "InvalidQuestStatus");
-    }
-
-    try {
-      await topUpQuest(quest, minAmount);
-      expect.fail("topUpQuest should reject cancelled quests");
-    } catch (err) {
-      expectAnchorError(err, "QuestAlreadyCancelled");
-    }
-
-    try {
-      await cancelQuest(quest);
-      expect.fail("cancelQuest should reject already cancelled quests");
-    } catch (err) {
-      expectAnchorError(err, "QuestAlreadyCancelled");
-    }
-  });
-
 });

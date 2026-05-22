@@ -1,487 +1,296 @@
-# LootLoop v0.2 Flow
+# LootLoop v0.3 Flow
 
-LootLoop v0.2 is a single-winner on-chain quest reward protocol. A publisher creates a quest, locks a reward, pays a separate platform fee, receives proof submissions before expiry, approves one submitter, and lets the approved submitter claim the reward.
-
-## Complete User Flow
-
-1. Publisher creates a quest with `create_quest`.
-2. The reward is locked in the quest Vault PDA.
-3. The publisher pays an additional 2% platform fee into the Fee Vault PDA.
-4. Submitters submit proof URI values with `submit_proof` before the quest expires.
-5. The reviewer or publisher approves one pending submission with `approve_submission` before the quest expires.
-6. The approved submitter claims the reward with `claim_reward`.
-7. The quest becomes `Completed`.
-
-Alternative flows:
-
-- The publisher can call `top_up_quest` to add more reward and optionally extend the deadline.
-- The publisher can call `cancel_quest` while the quest is not `Approved`, `Completed`, or `Cancelled`.
-- If cancellation happens before expiry, the remaining reward goes to the Public Goods Pool PDA.
-- If cancellation happens after expiry, the remaining reward returns to the publisher.
-
-All time checks use Solana `Clock`. Frontend time is never trusted by the program.
-
-All amounts are lamports. The program does not use floating point math.
-
-## PDA Seeds
-
-### Quest PDA
-
-```text
-[b"quest", publisher.key().as_ref(), quest_id.to_le_bytes()]
-```
-
-Purpose: stores one quest created by a publisher.
-
-Uniqueness:
-
-- Same publisher and same `quest_id` derive the same Quest PDA.
-- Same publisher and different `quest_id` derive different Quest PDA values.
-- Different publishers can reuse the same `quest_id` without collision.
-
-### Vault PDA
-
-```text
-[b"vault", quest.key().as_ref()]
-```
-
-Purpose: stores the quest reward lamports.
-
-Each Quest PDA has one reward Vault PDA.
-
-### Submission PDA
-
-```text
-[b"submission", quest.key().as_ref(), submitter.key().as_ref()]
-```
-
-Purpose: stores one submitter's proof for one quest.
-
-This means one submitter can submit only once per quest in the current MVP.
-
-### Fee Vault PDA
-
-```text
-[b"fee_vault"]
-```
-
-Purpose: receives platform fees from `create_quest` and `top_up_quest`.
-
-The current version only supports receiving fees. There is no fee withdrawal instruction yet.
-
-### Public Goods Pool PDA
-
-```text
-[b"public_goods_pool"]
-```
-
-Purpose: receives remaining quest rewards when a publisher cancels before expiry.
-
-The current version only supports receiving funds. There is no withdrawal or governance instruction yet.
+LootLoop v0.3 replaces the old escrow + `claim_reward` model with a unified quest engine. Approval is now the settlement event: when a reviewer approves a submission, the program immediately pays the submitter from PDA-managed pools.
 
 ## State Machine
 
-### Open
+- `Open`: accepts new proof submissions, reviews, and funding.
+- `Closing`: stops new submissions but keeps pending submissions reviewable.
+- `Closed`: terminal state.
+- `closing_reason`: records why the quest entered `Closing`: `None`, `EarlyManual`, `RewardPoolDepleted`, or `Expired`.
 
-The quest is active.
+## PDA Seeds
 
-Allowed actions:
+- Quest PDA: `[b"quest", publisher, quest_id]`
+- RewardPool PDA: `[b"reward_pool", quest]`
+- DepositPool PDA: `[b"deposit_pool", quest]`
+- Submission PDA: `[b"submission", quest, submission_index]`
+- UserProgress PDA: `[b"user_progress", quest, user]`
+- FeeVault PDA: `[b"fee_vault"]`
+- PublicGoodsPool PDA: `[b"public_goods_pool"]`
 
-- `submit_proof`, if not expired
-- `approve_submission`, if not expired and a pending submission exists
-- `top_up_quest`
-- `cancel_quest`
+## Instructions
 
-### Approved
+### `create_quest`
 
-One submission has been approved.
+Purpose: create a `OneTime` or `Recurring` quest and fund the initial pools.
 
-Allowed actions:
+Inputs:
 
-- `claim_reward` by the approved submitter
+- `quest_id`
+- `mode`
+- `review_mode`
+- `verification_template`
+- `template_config_hash`
+- `verification_schema_uri`
+- `authorized_verifier`
+- `metadata_uri`
+- `reviewer`
+- `reward_per_completion`
+- `initial_reward_funding`
+- `deposit_amount`
+- `duration_seconds`
+- `period_seconds`
+- `queue_max`
 
-Not allowed:
+Checks:
 
-- `submit_proof`
-- `approve_submission`
-- `cancel_quest`
-- `top_up_quest`
+- `duration_seconds >= 60`
+- `reward_per_completion >= 0.001 SOL`
+- `initial_reward_funding >= 0.001 SOL`
+- `initial_reward_funding % reward_per_completion == 0`
+- `deposit_amount % reward_per_completion == 0`
+- `deposit_amount >= (queue_max + 1) * reward_per_completion`
+- `Recurring` requires `period_seconds > 0`
+- `OneTime` requires `period_seconds == 0`
+- `AutoVerified` requires a non-default `authorized_verifier`
+- `AutoVerified` requires a non-zero `template_config_hash`
+- `verification_schema_uri` must fit the URI length limit
 
-Reason: once a winner is approved, the publisher should not be able to take or redirect the reward.
+Fund flow:
 
-### Completed
+- `initial_reward_funding` goes to `reward_pool`
+- `deposit_amount` goes to `deposit_pool`
+- `initial_reward_funding * 2%` goes to `fee_vault`
 
-The approved submitter has claimed the reward.
+### `submit_proof`
 
-This is a terminal state.
+Purpose: enqueue a proof submission.
 
-No further submit, approve, cancel, top-up, or claim actions are allowed.
+Checks:
 
-### Cancelled
+- Quest must be `Open`
+- Current time must be before `expires_at`
+- `pending_count < queue_max`
+- One-time users cannot have a pending or completed submission
+- Recurring users cannot submit twice in the same cycle
+- Recurring submissions are always for the current on-chain cycle; the frontend cannot pass `cycle_index`
 
-The publisher has cancelled the quest.
+State changes:
 
-This is a terminal state.
+- Creates `Submission` with `submission_index = quest.next_submission_index`
+- Stores `Submission.cycle_index` from the program-computed current cycle
+- Increments `next_submission_index`, `total_submissions`, and `pending_count`
+- Updates `UserProgress`
 
-No further submit, approve, cancel, top-up, or claim actions are allowed.
-
-## Fee Rules
-
-Fee rate:
+Recurring cycle calculation:
 
 ```text
-2% = 200 basis points
+current_cycle_index = (Clock::get()?.unix_timestamp - quest.start_at) / quest.period_seconds
 ```
 
-Formula:
+Historical catch-up submissions and future-cycle submissions are not supported. Qualification is always based on Solana `Clock` and current on-chain `UserProgress`.
 
-```text
-fee = amount * 200 / 10_000
-```
+### `approve_submission`
+
+Purpose: manually approve the next queued submission and automatically pay the submitter.
+
+Checks:
+
+- Quest must use `ReviewMode::Manual`
+- Caller must be reviewer or publisher
+- Quest must be `Open` or `Closing`
+- Submission must be `Pending`
+- `submission_index == quest.next_review_index`
+
+Fund flow:
+
+- If the quest is `Open` and `reward_pool` has at least one full reward, pay the full reward from `reward_pool`
+- If the quest is `Open` and `reward_pool` lacks one full reward, set `closing_reason = RewardPoolDepleted`, enter `Closing`, and pay the full reward from `deposit_pool`
+- If the quest is already `Closing`, pay approved pending submissions fully from `deposit_pool`
+- If `deposit_pool` cannot pay the full guaranteed reward, fail with `InsufficientDepositForGuaranteedPayment`
+
+State changes:
+
+- `Approved` means reviewed and fully paid
+- Increments `next_review_index`
+- Decrements `pending_count`
+- Updates totals and `UserProgress`
+- There is no `PartiallyPaid` status.
+
+### `auto_approve_submission`
+
+Purpose: automatically approve the next queued submission after verifying an authorized verifier signature.
+
+Checks:
+
+- Quest must use `ReviewMode::AutoVerified`
+- Quest must be `Open` or `Closing`
+- Submission must be `Pending`
+- `submission_index == quest.next_review_index`
+- `submission.quest == quest.key()`
+- `submission.submitter == verification_result.submitter`
+- `submission.cycle_index == verification_result.cycle_index`
+- `verification_result.quest == quest.key()`
+- `verification_result.submission_index == submission.submission_index`
+- `verification_result.template_type == quest.verification_template`
+- `verification_result.template_config_hash == quest.template_config_hash`
+- `verification_result.passed == true`
+- `verification_result.expires_at >= Clock::get()?.unix_timestamp`
+- The previous transaction instruction must be a native Ed25519 verification instruction
+- The Ed25519 signer must equal `quest.authorized_verifier`
+- The signed message must equal the serialized `VerificationResult`
+
+Signed message format:
+
+- `domain`: `LootLoopAutoReviewV1`
+- `program_id`
+- `quest`
+- `submission_index`
+- `submitter`
+- `cycle_index`
+- `template_type`
+- `template_config_hash`
+- `external_proof_hash`
+- `verified_value`
+- `passed`
+- `verified_at`
+- `expires_at`
+- `nonce`
+
+Fund flow:
+
+- Reuses the same approve-and-pay helper as `approve_submission`
+- Pays a full `reward_per_completion`
+- If `reward_pool` lacks one full reward, enters `Closing` with `RewardPoolDepleted` and pays from `deposit_pool`
+
+Design boundary:
+
+- The chain does not call Strava, Garmin, GitHub, or learning-platform APIs.
+- The verifier is responsible for off-chain data authenticity.
+- The chain only verifies the authorized verifier signature and context binding.
+- MVP does not create a `UsedProof` PDA; `external_proof_hash` replay prevention is verifier-side for now.
+
+### `reject_submission`
+
+Purpose: reject the next queued submission without payment.
+
+Checks:
+
+- Caller must be reviewer or publisher
+- Quest must not be `Closed`
+- Submission must be `Pending`
+- `submission_index == quest.next_review_index`
+
+State changes:
+
+- Submission becomes `Rejected`
+- Increments `next_review_index`
+- Decrements `pending_count`
+- Allows the same user to resubmit later
+
+### `fund_quest`
+
+Purpose: add reward funding, add deposit, and/or extend expiry.
+
+Checks:
+
+- Caller must be publisher
+- Quest must be `Open`
+- Reward funding is either `0` or at least `0.001 SOL`
+- Reward funding, when non-zero, must be a multiple of `reward_per_completion`
+- Additional deposit, when non-zero, must be a multiple of `reward_per_completion`
+- Extension cannot be negative
+
+Fund flow:
+
+- Reward funding goes to `reward_pool`
+- Extra deposit goes to `deposit_pool`
+- Reward funding pays an extra 2% fee to `fee_vault`
+
+### `close_quest`
+
+Purpose: start quest closure.
+
+Checks:
+
+- Caller must be publisher
+- Quest must be `Open`
 
 Rules:
 
-- `create_quest` charges 2% on `reward_amount`.
-- `top_up_quest` charges 2% on `top_up_amount`.
-- Fees are not deducted from the reward.
-- The publisher pays the reward and the fee separately.
+- If pending submissions remain, quest becomes `Closing`
+- If no pending submissions remain, settlement happens immediately
+- Early close sets `closing_reason = EarlyManual`
+- Expired close sets `closing_reason = Expired`
+- Early close sends remaining reward to `public_goods_pool` and sends remaining deposit minus 1% fee to `public_goods_pool`
+- Expired close returns remaining reward and deposit to publisher
 
-Example:
+### `settle_quest`
 
-```text
-reward_amount = 1 SOL
-quest vault receives 1 SOL
-fee vault receives 0.02 SOL
-publisher pays 1.02 SOL plus transaction and rent costs
-```
+Purpose: finalize a `Closing` quest after all pending submissions are reviewed.
 
-## Instruction Details
+Checks:
 
-## `create_quest`
+- Quest must be `Closing`
+- `pending_count == 0`
+- `next_review_index == next_submission_index`
+- Publisher account must match `quest.publisher`
 
-Purpose:
+Rules:
 
-Create a new Quest PDA, lock the initial reward, set the quest deadline, and collect the platform fee.
+- Uses `closing_reason`, not current wall-clock time, to choose settlement
+- `EarlyManual` or `RewardPoolDepleted`: remaining reward goes to `public_goods_pool`; remaining deposit pays 1% fee to `fee_vault`, then goes to `public_goods_pool`
+- `Expired`: remaining reward and deposit return to publisher
+- Anyone can call, but funds always settle to the recorded publisher, fee vault, or public goods pool
 
-Inputs:
+## Current Tests
 
-- `quest_id: u64`
-- `metadata_uri: String`
-- `reviewer: Pubkey`
-- `reward_amount: u64`
-- `duration_seconds: u64`
+The Anchor suite covers create, submit, FIFO approve, reject, deposit fallback, closing, settlement, closed-state rejection, recurring duplicate prevention, expired close, and AutoVerified signature approval.
 
-Accounts:
-
-- `quest`: initialized Quest PDA
-- `vault`: reward Vault PDA
-- `fee_vault`: global Fee Vault PDA
-- `publisher`: signer and payer
-- `system_program`
-
-Permission checks:
-
-- `publisher` must sign.
-
-Validation:
-
-- `metadata_uri.len() <= MAX_METADATA_URI_LEN`
-- `reward_amount >= MIN_REWARD_AMOUNT`
-- `duration_seconds >= MIN_QUEST_DURATION_SECONDS`, currently 1 minute
-- fee calculation must not overflow
-- `expires_at = Clock::get()?.unix_timestamp + duration_seconds`
-
-State changes:
-
-- `quest_id` is stored.
-- `publisher` is stored.
-- `reviewer` is stored.
-- `reward_amount` is stored.
-- `total_funded_amount = reward_amount`
-- `total_fee_paid = fee_amount`
-- `created_at = Clock now`
-- `expires_at = created_at + duration_seconds`
-- `cancelled_at = 0`
-- `status = Open`
-- `approved_submitter = None`
-- `submission_count = 0`
-- `reward_claimed = false`
-- PDA bumps are stored.
-- `metadata_uri` is stored.
-
-Fund flow:
+Current localnet result:
 
 ```text
-publisher -> quest vault: reward_amount
-publisher -> fee vault: reward_amount * 2%
+45 passing
 ```
 
-## `submit_proof`
+## Recurring 32-Cycle Window
 
-Purpose:
+`UserProgress` stores a fixed recent-cycle window:
 
-Create a Submission PDA for a submitter's proof URI.
+- `recent_cycles[32]`
+- `recent_cycle_states[32]`
+- state `0`: empty or rejected
+- state `1`: pending
+- state `2`: approved and fully paid
 
-Inputs:
+The window is a protocol duplicate-prevention cache for the current and recent cycles. On submit, the program prunes states older than 32 cycles relative to the current cycle, checks the current cycle state, then writes `Pending`. On approval, the submitted cycle becomes `Approved` if it is still inside the recent window. On rejection, the submitted cycle becomes empty/rejected, allowing resubmission in the same current cycle with a new `submission_index`.
 
-- `proof_uri: String`
+The chain does not store long-term per-user recurring history beyond this window. A frontend may keep local or indexed history with:
 
-Accounts:
+- quest address
+- cycle index
+- proof URI
+- submitted/reviewed timestamps
+- result
+- reward amount
+- transaction signature
 
-- `quest`: existing Quest account
-- `submission`: initialized Submission PDA
-- `submitter`: signer and payer
-- `system_program`
+Those off-chain records are for display, query, and analytics only. They are not accepted by the protocol for submit eligibility, reward payment, review, settlement, or restoring a user's status.
 
-Permission checks:
+Roadmap:
 
-- `submitter` must sign.
+- `PeriodProgress` PDA
+- `UserCycle` PDA
+- off-chain indexer
+- verifiable long-term history queries
 
-Validation:
+## Auto-Review Roadmap
 
-- Quest must be `Open`.
-- Quest must not be expired.
-- `proof_uri.len() <= MAX_PROOF_URI_LEN`
-- Submission PDA must not already exist.
-
-State changes:
-
-- Creates the Submission account.
-- `submission.quest = quest`
-- `submission.submitter = submitter`
-- `submission.status = Pending`
-- `submission.submitted_at = Clock now`
-- `submission.reviewed_at = 0`
-- `submission.proof_uri = proof_uri`
-- `quest.submission_count += 1`
-
-Fund flow:
-
-- No reward movement.
-- Submitter pays rent for the Submission account.
-
-## `approve_submission`
-
-Purpose:
-
-Approve a pending submission and mark the quest as ready for reward claim.
-
-Inputs:
-
-- None.
-
-Accounts:
-
-- `quest`: existing Quest account
-- `submission`: existing Submission account
-- `reviewer`: signer
-
-Permission checks:
-
-- Signer must be `quest.reviewer` or `quest.publisher`.
-
-Validation:
-
-- Quest must be `Open` or `InReview`.
-- Quest must not be expired.
-- Submission must be `Pending`.
-- Submission must belong to the provided Quest.
-- Quest reward must not be claimed.
-- Quest must not already have an approved submitter.
-
-State changes:
-
-- `submission.status = Approved`
-- `submission.reviewed_at = Clock now`
-- `quest.status = Approved`
-- `quest.approved_submitter = Some(submission.submitter)`
-
-Fund flow:
-
-- No fund movement.
-
-## `claim_reward`
-
-Purpose:
-
-Let the approved submitter claim the locked reward from the quest vault.
-
-Inputs:
-
-- None.
-
-Accounts:
-
-- `quest`: existing Quest account
-- `submission`: existing Submission account
-- `vault`: reward Vault PDA
-- `submitter`: signer
-- `system_program`
-
-Permission checks:
-
-- `submitter` must sign.
-- `submitter` must be the approved submitter.
-
-Validation:
-
-- Quest must be `Approved`.
-- Submission must be `Approved`.
-- Submission must belong to the provided Quest.
-- Submission submitter must equal the signer.
-- `quest.approved_submitter` must equal the signer.
-- `quest.reward_claimed` must be false.
-- Vault balance must be at least `quest.reward_amount`.
-
-State changes:
-
-- `quest.reward_claimed = true`
-- `quest.status = Completed`
-
-Fund flow:
-
-```text
-quest vault -> approved submitter: quest.reward_amount
-```
-
-The Vault PDA signs with:
-
-```text
-[b"vault", quest.key().as_ref(), &[quest.vault_bump]]
-```
-
-Expiry note:
-
-`claim_reward` does not block on expiry. Once a submission is approved, the approved submitter should still be able to claim.
-
-## `top_up_quest`
-
-Purpose:
-
-Let the publisher add more reward and optionally extend the deadline.
-
-Inputs:
-
-- `top_up_amount: u64`
-- `extend_duration_seconds: u64`
-
-Accounts:
-
-- `quest`: existing Quest account
-- `vault`: reward Vault PDA
-- `fee_vault`: global Fee Vault PDA
-- `publisher`: signer
-- `system_program`
-
-Permission checks:
-
-- Signer must be `quest.publisher`.
-
-Validation:
-
-- Quest must be `Open` or `InReview`.
-- Quest must not be `Approved`.
-- Quest must not be `Completed`.
-- Quest must not be `Cancelled`.
-- `quest.reward_claimed` must be false.
-- `top_up_amount >= MIN_TOP_UP_AMOUNT`
-- fee calculation must not overflow.
-- New deadline must not be earlier than the old deadline.
-- If the quest is already expired, the extension must push `expires_at` after current Solana Clock time.
-
-State changes:
-
-- `quest.reward_amount += top_up_amount`
-- `quest.total_funded_amount += top_up_amount`
-- `quest.total_fee_paid += fee_amount`
-- `quest.expires_at += extend_duration_seconds`
-
-Fund flow:
-
-```text
-publisher -> quest vault: top_up_amount
-publisher -> fee vault: top_up_amount * 2%
-```
-
-## `cancel_quest`
-
-Purpose:
-
-Let the publisher cancel an unapproved, unfinished quest and route the remaining reward according to expiry.
-
-Inputs:
-
-- None.
-
-Accounts:
-
-- `quest`: existing Quest account
-- `vault`: reward Vault PDA
-- `public_goods_pool`: Public Goods Pool PDA
-- `publisher`: signer
-- `system_program`
-
-Permission checks:
-
-- Signer must be `quest.publisher`.
-
-Validation:
-
-- Quest must not be `Approved`.
-- Quest must not be `Completed`.
-- Quest must not be `Cancelled`.
-- Quest must be `Open` or `InReview`.
-- `quest.reward_claimed` must be false.
-
-State changes:
-
-- `quest.status = Cancelled`
-- `quest.cancelled_at = Clock now`
-
-Fund flow:
-
-If current Solana Clock time is before or equal to `expires_at`:
-
-```text
-quest vault -> public goods pool: remaining vault balance
-```
-
-If current Solana Clock time is after `expires_at`:
-
-```text
-quest vault -> publisher: remaining vault balance
-```
-
-The Vault PDA signs with:
-
-```text
-[b"vault", quest.key().as_ref(), &[quest.vault_bump]]
-```
-
-## Current Test Result
-
-```text
-26 passing
-```
-
-Covered areas include:
-
-- Quest creation
-- Fee vault collection on create
-- Minimum duration validation
-- Proof submission
-- Submission approval
-- Reward claim
-- Top-up success and failure cases
-- Cancellation before expiry into public goods pool
-- Cancellation permission checks
-- Approved, Completed, and Cancelled terminal behavior
-
-## Current Limitations
-
-- `fee_vault` only receives funds. There is no withdraw instruction yet.
-- `public_goods_pool` only receives funds. There is no withdrawal or governance instruction yet.
-- Automated post-expiry tests are limited by local validator time-warp support.
-- The current protocol is single-winner mode.
-- Proof data is represented as a URI or hash string.
-- A submitter can submit only once per quest.
+- verifier registry
+- multi-verifier threshold
+- `UsedProof` PDA
+- Strava adapter
+- GitHub adapter
+- study platform adapter
+- TEE / ZK proof based verifier

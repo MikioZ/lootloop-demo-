@@ -3,831 +3,861 @@ import * as anchor from "@anchor-lang/core";
 import { Program } from "@anchor-lang/core";
 import { useConnection, useWallet } from "@solana/wallet-adapter-react";
 import { WalletMultiButton } from "@solana/wallet-adapter-react-ui";
-import { PublicKey, SystemProgram, LAMPORTS_PER_SOL } from "@solana/web3.js";
+import {
+  PublicKey,
+  SystemProgram,
+  LAMPORTS_PER_SOL,
+  Ed25519Program,
+  SYSVAR_INSTRUCTIONS_PUBKEY,
+} from "@solana/web3.js";
 import { Buffer } from "buffer";
 
 import idl from "./idl/lootloop.json";
 import type { Lootloop } from "../../target/types/lootloop";
 
-type WalletAdapterProvider = anchor.Provider & {
-  wallet: anchor.Wallet;
-};
-
-type QuestAccount = Awaited<ReturnType<Program<Lootloop>["account"]["quest"]["fetch"]>>;
-type QuestDetail = {
-  quest: PublicKey;
-  account: QuestAccount;
-  vaultBalance: number;
-};
 type Language = "en" | "zh";
-type TranslationKey =
-  | "app.title"
-  | "app.subtitle"
-  | "language"
-  | "wallet"
-  | "notConnected"
-  | "rpc"
-  | "status"
-  | "ready"
-  | "loadingQuest"
-  | "feeNote"
-  | "cancelNote"
-  | "createQuest"
-  | "submitProof"
-  | "approveSubmission"
-  | "claimReward"
-  | "topUpQuest"
-  | "cancelQuest"
-  | "stateViewer"
-  | "questDetail"
-  | "questId"
-  | "metadataUri"
-  | "reviewerPubkey"
-  | "rewardSol"
-  | "years"
-  | "months"
-  | "days"
-  | "hours"
-  | "minutes"
-  | "questPda"
-  | "vaultPda"
-  | "feeVaultPda"
-  | "shareLink"
-  | "copyLink"
-  | "proofUri"
-  | "submissionPda"
-  | "submitterPubkey"
-  | "topUpSol"
-  | "fetchQuest"
-  | "walletAddress"
-  | "actionComplete"
-  | "actionFailed"
-  | "field.quest"
-  | "field.publisher"
-  | "field.reviewer"
-  | "field.status"
-  | "field.rewardAmount"
-  | "field.totalFunded"
-  | "field.totalFee"
-  | "field.createdAt"
-  | "field.expiresAt"
-  | "field.cancelledAt"
-  | "field.approvedSubmitter"
-  | "field.submissionCount"
-  | "field.rewardClaimed"
-  | "field.metadataUri"
-  | "field.vaultBalance"
-  | "field.feeVaultBalance"
-  | "field.publicGoodsPoolBalance";
+type QuestAccount = Awaited<ReturnType<Program<Lootloop>["account"]["quest"]["fetch"]>>;
+type SubmissionAccount = Awaited<
+  ReturnType<Program<Lootloop>["account"]["submission"]["fetch"]>
+>;
+type UserProgressAccount = Awaited<
+  ReturnType<Program<Lootloop>["account"]["userProgress"]["fetch"]>
+>;
 
 const PROGRAM_ID = new PublicKey("CQmvWxzKoxVrVQq798qY1tm699ivLJcvC5XWw8o4DTUj");
-const QUEST_SEED = "quest";
-const SUBMISSION_SEED = "submission";
-const VAULT_SEED = "vault";
-const FEE_VAULT_SEED = "fee_vault";
-const PUBLIC_GOODS_POOL_SEED = "public_goods_pool";
+const RPC_ENDPOINT = "https://api.devnet.solana.com";
+const MIN_DURATION_SECONDS = 60;
+const PLATFORM_FEE_BPS = 200;
+const BPS_DENOMINATOR = 10_000;
+const DEFAULT_PUBKEY = new PublicKey("11111111111111111111111111111111");
 
-const translations: Record<Language, Record<TranslationKey, string>> = {
+const copy = {
   en: {
-    "app.title": "LootLoop",
-    "app.subtitle": "On-chain quest rewards on Solana devnet.",
-    language: "Language",
+    title: "LootLoop v0.3",
+    subtitle: "Unified Quest Engine on Solana devnet.",
     wallet: "Wallet",
-    notConnected: "Not connected",
     rpc: "RPC endpoint",
+    language: "Language",
+    create: "Create Quest",
+    submit: "Submit Proof",
+    approve: "Approve Submission",
+    reject: "Reject Submission",
+    fund: "Fund Quest",
+    close: "Close / Settle",
+    viewer: "State Viewer",
+    detail: "Quest Detail",
     status: "Status",
-    ready: "Ready",
-    loadingQuest: "Loading quest...",
-    feeNote: "Fee rule: create_quest and top_up_quest charge an extra 2% platform fee. The fee is paid separately and is not deducted from the reward.",
-    cancelNote: "Cancel rule: before expiry, remaining rewards go to public_goods_pool; after expiry, they return to the publisher. Approved, Completed, and Cancelled quests cannot be cancelled.",
-    createQuest: "Create Quest",
-    submitProof: "Submit Proof",
-    approveSubmission: "Approve Submission",
-    claimReward: "Claim Reward",
-    topUpQuest: "Top Up Quest",
-    cancelQuest: "Cancel Quest",
-    stateViewer: "State Viewer",
-    questDetail: "Quest Detail",
-    questId: "Quest ID",
-    metadataUri: "Metadata URI",
-    reviewerPubkey: "Reviewer Pubkey",
-    rewardSol: "Reward SOL",
-    years: "Years",
-    months: "Months",
-    days: "Days",
-    hours: "Hours",
-    minutes: "Minutes",
-    questPda: "Quest PDA",
-    vaultPda: "Vault PDA",
-    feeVaultPda: "Fee Vault PDA",
-    shareLink: "Share Link",
-    copyLink: "Copy Link",
-    proofUri: "Proof URI",
-    submissionPda: "Submission PDA",
-    submitterPubkey: "Submitter Pubkey",
-    topUpSol: "Top Up SOL",
-    fetchQuest: "Fetch Quest",
-    walletAddress: "Reviewer wallet address",
-    actionComplete: "complete",
-    actionFailed: "failed",
-    "field.quest": "quest",
-    "field.publisher": "publisher",
-    "field.reviewer": "reviewer",
-    "field.status": "status",
-    "field.rewardAmount": "reward_amount",
-    "field.totalFunded": "total_funded_amount",
-    "field.totalFee": "total_fee_paid",
-    "field.createdAt": "created_at",
-    "field.expiresAt": "expires_at",
-    "field.cancelledAt": "cancelled_at",
-    "field.approvedSubmitter": "approved_submitter",
-    "field.submissionCount": "submission_count",
-    "field.rewardClaimed": "reward_claimed",
-    "field.metadataUri": "metadata_uri",
-    "field.vaultBalance": "vault_balance",
-    "field.feeVaultBalance": "fee_vault_balance",
-    "field.publicGoodsPoolBalance": "public_goods_pool_balance",
+    fee: "Protocol fee: reward funding pays an extra 2%. The fee is not deducted from the reward pool.",
+    closeRule:
+      "If reward_pool cannot pay one full reward, the quest enters irreversible Closing. Pending submissions can still be reviewed; approved submissions are paid in full from deposit_pool. Early Closing sends remaining reward/deposit to public_goods_pool after a 1% deposit fee. Expired Closing refunds remaining reward/deposit to publisher.",
+    recurringRule:
+      "Recurring quests only accept proof for the current on-chain cycle. Historical catch-up and future-cycle submissions are not supported. UserProgress keeps a 32-cycle on-chain window for pending/approved duplicate prevention; older history may live in localStorage, IndexedDB, or an indexer for display only, never as a protocol credential.",
+    autoRule:
+      "Auto-Review v1 is a verifier signature mock flow. The program does not read Strava, Garmin, GitHub, or study-platform APIs; an authorized verifier checks off-chain data, signs a bound result, and the chain verifies that signature before paying.",
   },
   zh: {
-    "app.title": "LootLoop",
-    "app.subtitle": "Solana devnet 上的链上任务奖励协议。",
-    language: "语言",
+    title: "LootLoop v0.3",
+    subtitle: "Solana devnet 上的统一任务引擎。",
     wallet: "钱包",
-    notConnected: "未连接",
     rpc: "RPC 节点",
+    language: "语言",
+    create: "创建任务",
+    submit: "提交证明",
+    approve: "通过提交",
+    reject: "拒绝提交",
+    fund: "补充资金",
+    close: "关闭 / 结算",
+    viewer: "状态查看器",
+    detail: "任务详情",
     status: "状态",
-    ready: "就绪",
-    loadingQuest: "正在加载任务...",
-    feeNote: "手续费规则：create_quest 和 top_up_quest 会额外收取 2% 平台手续费。手续费由发布者单独支付，不会从奖励中扣除。",
-    cancelNote: "取消规则：未过期取消时，剩余奖励进入 public_goods_pool；已过期取消时，剩余奖励返还 publisher。Approved、Completed、Cancelled 状态不能取消。",
-    createQuest: "创建任务",
-    submitProof: "提交证明",
-    approveSubmission: "审核提交",
-    claimReward: "领取奖励",
-    topUpQuest: "补充奖励",
-    cancelQuest: "取消任务",
-    stateViewer: "状态查看器",
-    questDetail: "任务详情",
-    questId: "任务 ID",
-    metadataUri: "任务元数据 URI",
-    reviewerPubkey: "审核者公钥",
-    rewardSol: "奖励 SOL",
-    years: "年",
-    months: "月",
-    days: "日",
-    hours: "小时",
-    minutes: "分钟",
-    questPda: "Quest PDA（任务地址）",
-    vaultPda: "Vault PDA（奖励金库）",
-    feeVaultPda: "Fee Vault PDA（手续费金库）",
-    shareLink: "分享链接",
-    copyLink: "复制链接",
-    proofUri: "证明 URI",
-    submissionPda: "Submission PDA（提交账户）",
-    submitterPubkey: "提交者公钥",
-    topUpSol: "补充奖励 SOL",
-    fetchQuest: "读取任务",
-    walletAddress: "审核者钱包地址",
-    actionComplete: "完成",
-    actionFailed: "失败",
-    "field.quest": "quest（任务地址）",
-    "field.publisher": "publisher（发布者）",
-    "field.reviewer": "reviewer（审核者）",
-    "field.status": "status（状态）",
-    "field.rewardAmount": "reward_amount（奖励金额）",
-    "field.totalFunded": "total_funded_amount（累计奖励）",
-    "field.totalFee": "total_fee_paid（累计手续费）",
-    "field.createdAt": "created_at（创建时间）",
-    "field.expiresAt": "expires_at（截止时间）",
-    "field.cancelledAt": "cancelled_at（取消时间）",
-    "field.approvedSubmitter": "approved_submitter（获批提交者）",
-    "field.submissionCount": "submission_count（提交数）",
-    "field.rewardClaimed": "reward_claimed（是否已领取）",
-    "field.metadataUri": "metadata_uri（元数据）",
-    "field.vaultBalance": "vault_balance（奖励金库余额）",
-    "field.feeVaultBalance": "fee_vault_balance（手续费金库余额）",
-    "field.publicGoodsPoolBalance": "public_goods_pool_balance（公益池余额）",
+    fee: "平台手续费：奖励池充值额外支付 2%，不会从 reward_pool 扣除。",
+    closeRule:
+      "如果 reward_pool 不足一份完整奖励，任务会进入不可恢复的 Closing。已有 pending 仍可审核，通过后由 deposit_pool 完整支付。提前 Closing 的剩余 reward/deposit 在押金扣 1% 后进入 public_goods_pool；到期 Closing 的剩余 reward/deposit 退回 publisher。",
+    recurringRule:
+      "周期任务只能提交链上当前周期 proof，不支持补交历史周期或提交未来周期。UserProgress 只保存 32 周期链上窗口，用于 pending/approved 去重；更早历史可存在 localStorage、IndexedDB 或 indexer，仅用于展示查询，不能作为协议凭证。",
+    autoRule:
+      "Auto-Review v1 是 verifier 签名模拟流程。链上程序不读取 Strava、Garmin、GitHub 或学习平台 API；authorized verifier 在链下判断并签名，链上验证签名后发奖。",
   },
 };
 
-const toPubkey = (value: string) => new PublicKey(value.trim());
-const toQuestId = (value: string) => {
+const bn = (value: string) => {
   const trimmed = value.trim();
-  if (!/^\d+$/.test(trimmed)) {
-    throw new Error("Quest ID must be a non-negative integer");
-  }
+  if (!/^\d+$/.test(trimmed)) throw new Error("Expected integer");
   return new anchor.BN(trimmed);
 };
-const toRewardLamports = (value: string) => {
+
+const solToLamports = (value: string) => {
   const trimmed = value.trim();
   if (!/^\d+(\.\d{1,9})?$/.test(trimmed)) {
-    throw new Error("Reward SOL must be a positive number with at most 9 decimals");
+    throw new Error("SOL amount must have at most 9 decimals");
   }
-
   const [whole, fraction = ""] = trimmed.split(".");
-  const lamports = new anchor.BN(whole)
+  return new anchor.BN(whole)
     .mul(new anchor.BN(LAMPORTS_PER_SOL))
     .add(new anchor.BN(fraction.padEnd(9, "0")));
-  if (lamports.isZero()) {
-    throw new Error("Reward SOL must be greater than 0");
-  }
-  return lamports;
 };
-const toDurationSeconds = (
-  years: string,
-  months: string,
-  days: string,
-  hours: string,
-  minutes: string,
-  allowZero = false
-) => {
-  const parts = [years, months, days, hours, minutes].map((value) => {
-    const trimmed = value.trim() || "0";
-    if (!/^\d+$/.test(trimmed)) {
-      throw new Error("Duration fields must be non-negative integers");
-    }
-    return new anchor.BN(trimmed);
+
+const durationToSeconds = (days: string, hours: string, minutes: string) =>
+  bn(days || "0")
+    .mul(new anchor.BN(86_400))
+    .add(bn(hours || "0").mul(new anchor.BN(3_600)))
+    .add(bn(minutes || "0").mul(new anchor.BN(60)));
+
+const enumName = (value: unknown) =>
+  value && typeof value === "object" ? Object.keys(value as Record<string, unknown>)[0] : "";
+
+const lamportsToSol = (value: number | anchor.BN) => {
+  const lamports = typeof value === "number" ? value : value.toNumber();
+  return (lamports / LAMPORTS_PER_SOL).toLocaleString(undefined, {
+    maximumFractionDigits: 9,
   });
-  const [yearBn, monthBn, dayBn, hourBn, minuteBn] = parts;
-  const seconds = yearBn
-    .mul(new anchor.BN(365 * 24 * 60 * 60))
-    .add(monthBn.mul(new anchor.BN(30 * 24 * 60 * 60)))
-    .add(dayBn.mul(new anchor.BN(24 * 60 * 60)))
-    .add(hourBn.mul(new anchor.BN(60 * 60)))
-    .add(minuteBn.mul(new anchor.BN(60)));
-  if (!allowZero && seconds.isZero()) {
-    throw new Error("Duration must be greater than 0");
-  }
-  return seconds;
 };
 
-const formatStatus = (status: Record<string, unknown>) => Object.keys(status)[0] ?? "unknown";
-const formatPubkey = (key: PublicKey | null | undefined) => key?.toString() ?? "None";
-const formatUnix = (value: anchor.BN) =>
-  `${value.toString()} (${new Date(value.toNumber() * 1000).toLocaleString()})`;
-const extractErrorMessage = (err: unknown) => {
-  if (err instanceof anchor.AnchorError) {
-    return `${err.error.errorCode.code}: ${err.error.errorMessage}`;
-  }
-  if (err instanceof Error) {
-    return err.message;
-  }
-  return String(err);
+const isMultipleOfReward = (amount: anchor.BN, reward: anchor.BN) =>
+  amount.isZero() || (reward.gt(new anchor.BN(0)) && amount.mod(reward).isZero());
+
+const cycleStateLabel = (state: number) => {
+  if (state === 1) return "Pending";
+  if (state === 2) return "Approved";
+  return "Empty / Rejected";
 };
 
-function deriveQuestPda(publisher: PublicKey, questId: anchor.BN) {
-  return PublicKey.findProgramAddressSync(
-    [
-      Buffer.from(QUEST_SEED),
-      publisher.toBuffer(),
-      questId.toArrayLike(Buffer, "le", 8),
-    ],
-    PROGRAM_ID
-  )[0];
-}
+const hexToBytes = (value: string, length: number) => {
+  const trimmed = value.trim().replace(/^0x/, "");
+  if (!new RegExp(`^[0-9a-fA-F]{${length * 2}}$`).test(trimmed)) {
+    throw new Error(`Expected ${length}-byte hex`);
+  }
+  return Array.from(Buffer.from(trimmed, "hex"));
+};
 
-function deriveVaultPda(quest: PublicKey) {
-  return PublicKey.findProgramAddressSync(
-    [Buffer.from(VAULT_SEED), quest.toBuffer()],
-    PROGRAM_ID
-  )[0];
-}
+const templateTypeIndex = (template: unknown) => {
+  const key = enumName(template);
+  return [
+    "distanceActivity",
+    "studyDuration",
+    "githubContribution",
+    "attendanceCheckin",
+    "customSigned",
+  ].indexOf(key);
+};
 
-function deriveFeeVaultPda() {
-  return PublicKey.findProgramAddressSync([Buffer.from(FEE_VAULT_SEED)], PROGRAM_ID)[0];
-}
+const writeU32 = (value: number) => {
+  const out = Buffer.alloc(4);
+  out.writeUInt32LE(value, 0);
+  return out;
+};
 
-function derivePublicGoodsPoolPda() {
-  return PublicKey.findProgramAddressSync(
-    [Buffer.from(PUBLIC_GOODS_POOL_SEED)],
-    PROGRAM_ID
-  )[0];
-}
+const writeI64 = (value: anchor.BN) => {
+  const out = Buffer.alloc(8);
+  out.writeBigInt64LE(BigInt(value.toString()), 0);
+  return out;
+};
 
-function deriveSubmissionPda(quest: PublicKey, submitter: PublicKey) {
-  return PublicKey.findProgramAddressSync(
-    [Buffer.from(SUBMISSION_SEED), quest.toBuffer(), submitter.toBuffer()],
-    PROGRAM_ID
-  )[0];
-}
+const serializeVerificationResult = (result: any) => {
+  const domain = Buffer.from(result.domain, "utf8");
+  return Buffer.concat([
+    writeU32(domain.length),
+    domain,
+    result.programId.toBuffer(),
+    result.quest.toBuffer(),
+    result.submissionIndex.toArrayLike(Buffer, "le", 8),
+    result.submitter.toBuffer(),
+    result.cycleIndex.toArrayLike(Buffer, "le", 8),
+    Buffer.from([templateTypeIndex(result.templateType)]),
+    Buffer.from(result.templateConfigHash),
+    Buffer.from(result.externalProofHash),
+    result.verifiedValue.toArrayLike(Buffer, "le", 8),
+    Buffer.from([result.passed ? 1 : 0]),
+    writeI64(result.verifiedAt),
+    writeI64(result.expiresAt),
+    Buffer.from(result.nonce),
+  ]);
+};
 
-export default function App() {
-  const { connection } = useConnection();
+function App() {
   const wallet = useWallet();
-  const questPdaFromUrl = useMemo(() => {
-    const match = window.location.pathname.match(/^\/quest\/([^/]+)$/);
-    return match?.[1] ?? "";
-  }, []);
-  const [language, setLanguage] = useState<Language>(() => {
-    const stored = localStorage.getItem("lootloop-language");
-    return stored === "zh" ? "zh" : "en";
-  });
-  const t = (key: TranslationKey) => translations[language][key];
-  const [status, setStatus] = useState(t("ready"));
-  const [errorMessage, setErrorMessage] = useState("");
+  const { connection } = useConnection();
+  const [language, setLanguage] = useState<Language>(
+    () => (localStorage.getItem("lootloop-language") as Language) || "en"
+  );
+  const t = copy[language];
+  const [status, setStatus] = useState("Ready");
+  const [error, setError] = useState("");
 
+  const [mode, setMode] = useState<"oneTime" | "recurring">("oneTime");
+  const [reviewMode, setReviewMode] = useState<"manual" | "autoVerified">("manual");
+  const [verificationTemplate, setVerificationTemplate] = useState<
+    "distanceActivity" | "studyDuration" | "githubContribution" | "attendanceCheckin" | "customSigned"
+  >("customSigned");
+  const [templateConfigHash, setTemplateConfigHash] = useState("00".repeat(32));
+  const [verificationSchemaUri, setVerificationSchemaUri] = useState("");
+  const [authorizedVerifier, setAuthorizedVerifier] = useState("");
   const [questId, setQuestId] = useState("1");
-  const [metadataUri, setMetadataUri] = useState("https://lootloop.example/quests/1.json");
+  const [metadataUri, setMetadataUri] = useState("https://example.com/quest.json");
   const [reviewer, setReviewer] = useState("");
-  const [rewardSol, setRewardSol] = useState("0.1");
-  const [durationYears, setDurationYears] = useState("0");
-  const [durationMonths, setDurationMonths] = useState("0");
+  const [rewardPerCompletion, setRewardPerCompletion] = useState("0.001");
+  const [initialRewardFunding, setInitialRewardFunding] = useState("0.003");
+  const [depositAmount, setDepositAmount] = useState("0.003");
+  const [queueMax, setQueueMax] = useState("2");
   const [durationDays, setDurationDays] = useState("0");
   const [durationHours, setDurationHours] = useState("0");
   const [durationMinutes, setDurationMinutes] = useState("1");
-  const [createdQuest, setCreatedQuest] = useState("");
-  const [createdVault, setCreatedVault] = useState("");
-  const [createdFeeVault, setCreatedFeeVault] = useState("");
-  const [shareLink, setShareLink] = useState("");
+  const [periodDays, setPeriodDays] = useState("0");
+  const [periodHours, setPeriodHours] = useState("0");
+  const [periodMinutes, setPeriodMinutes] = useState("1");
 
-  const [submitQuest, setSubmitQuest] = useState("");
-  const [proofUri, setProofUri] = useState("https://github.com/demo/proof");
-  const [submissionPda, setSubmissionPda] = useState("");
-
-  const [approveQuest, setApproveQuest] = useState("");
-  const [approveSubmitter, setApproveSubmitter] = useState("");
-
-  const [claimQuest, setClaimQuest] = useState("");
-  const [claimSubmission, setClaimSubmission] = useState("");
-
-  const [topUpQuestPda, setTopUpQuestPda] = useState("");
-  const [topUpSol, setTopUpSol] = useState("0.05");
-  const [extendYears, setExtendYears] = useState("0");
-  const [extendMonths, setExtendMonths] = useState("0");
+  const [questPdaInput, setQuestPdaInput] = useState("");
+  const [proofUri, setProofUri] = useState("https://example.com/proof.json");
+  const [reviewQuestInput, setReviewQuestInput] = useState("");
+  const [reviewIndexInput, setReviewIndexInput] = useState("0");
+  const [autoVerifiedValue, setAutoVerifiedValue] = useState("100");
+  const [autoExternalProofHash, setAutoExternalProofHash] = useState("11".repeat(32));
+  const [autoExpiresAt, setAutoExpiresAt] = useState(() =>
+    String(Math.floor(Date.now() / 1000) + 300)
+  );
+  const [autoNonce, setAutoNonce] = useState("22".repeat(32));
+  const [autoSignature, setAutoSignature] = useState("");
+  const [fundQuestInput, setFundQuestInput] = useState("");
+  const [fundReward, setFundReward] = useState("0.001");
+  const [fundDeposit, setFundDeposit] = useState("0");
   const [extendDays, setExtendDays] = useState("0");
   const [extendHours, setExtendHours] = useState("0");
-  const [extendMinutes, setExtendMinutes] = useState("30");
-
-  const [cancelQuestPda, setCancelQuestPda] = useState("");
-
-  const [viewerQuest, setViewerQuest] = useState("");
-  const [questAccount, setQuestAccount] = useState<QuestAccount | null>(null);
-  const [vaultBalance, setVaultBalance] = useState<number | null>(null);
-  const [feeVaultBalance, setFeeVaultBalance] = useState<number | null>(null);
-  const [publicGoodsPoolBalance, setPublicGoodsPoolBalance] = useState<number | null>(null);
-  const [questDetail, setQuestDetail] = useState<QuestDetail | null>(null);
-  const [detailProofUri, setDetailProofUri] = useState("https://github.com/demo/proof");
-  const [detailSubmissionPda, setDetailSubmissionPda] = useState("");
-
-  const derivedQuest = useMemo(() => {
-    if (!wallet.publicKey) return "";
-    try {
-      return deriveQuestPda(wallet.publicKey, toQuestId(questId)).toString();
-    } catch {
-      return "";
-    }
-  }, [questId, wallet.publicKey]);
-  const derivedShareLink = derivedQuest ? `${window.location.origin}/quest/${derivedQuest}` : "";
-
-  useEffect(() => {
-    if (wallet.publicKey && !reviewer) {
-      setReviewer(wallet.publicKey.toString());
-    }
-  }, [reviewer, wallet.publicKey]);
+  const [extendMinutes, setExtendMinutes] = useState("0");
+  const [closeQuestInput, setCloseQuestInput] = useState("");
+  const [viewerQuestInput, setViewerQuestInput] = useState("");
+  const [lastQuest, setLastQuest] = useState("");
+  const [lastShareLink, setLastShareLink] = useState("");
+  const [lastSubmission, setLastSubmission] = useState("");
+  const [questDetail, setQuestDetail] = useState<{
+    quest: PublicKey;
+    account: QuestAccount;
+    rewardPoolBalance: number;
+    depositPoolBalance: number;
+    feeVaultBalance: number;
+    publicGoodsPoolBalance: number;
+    chainNow: number;
+    currentCycleIndex: number;
+    userProgress: UserProgressAccount | null;
+  } | null>(null);
 
   useEffect(() => {
     localStorage.setItem("lootloop-language", language);
-  }, [language]);
-
-  useEffect(() => {
-    if (status === translations.en.ready || status === translations.zh.ready) {
-      setStatus(t("ready"));
-    }
   }, [language]);
 
   const readOnlyProgram = useMemo(() => {
     const readOnlyWallet = {
       publicKey: SystemProgram.programId,
       signTransaction: async () => {
-        throw new Error("Read-only provider cannot sign transactions");
+        throw new Error("Read-only provider cannot sign");
       },
       signAllTransactions: async () => {
-        throw new Error("Read-only provider cannot sign transactions");
+        throw new Error("Read-only provider cannot sign");
       },
     } as unknown as anchor.Wallet;
-
     const provider = new anchor.AnchorProvider(
       connection,
       readOnlyWallet,
       anchor.AnchorProvider.defaultOptions()
-    ) as WalletAdapterProvider;
-
+    );
     return new Program<Lootloop>(idl as Lootloop, provider);
   }, [connection]);
 
   const program = useMemo(() => {
     if (!wallet.publicKey || !wallet.signTransaction || !wallet.signAllTransactions) return null;
-
     const provider = new anchor.AnchorProvider(
       connection,
       wallet as unknown as anchor.Wallet,
       anchor.AnchorProvider.defaultOptions()
-    ) as WalletAdapterProvider;
-
+    );
     return new Program<Lootloop>(idl as Lootloop, provider);
   }, [connection, wallet]);
 
-  const fetchQuestDetail = async (questAddress: string) => {
-    const quest = toPubkey(questAddress);
-    const account = await readOnlyProgram.account.quest.fetch(quest);
-    const vault = deriveVaultPda(quest);
-    const balance = await connection.getBalance(vault);
+  const deriveQuest = (id: anchor.BN, publisher: PublicKey) =>
+    PublicKey.findProgramAddressSync(
+      [Buffer.from("quest"), publisher.toBuffer(), id.toArrayLike(Buffer, "le", 8)],
+      PROGRAM_ID
+    )[0];
+  const deriveRewardPool = (quest: PublicKey) =>
+    PublicKey.findProgramAddressSync([Buffer.from("reward_pool"), quest.toBuffer()], PROGRAM_ID)[0];
+  const deriveDepositPool = (quest: PublicKey) =>
+    PublicKey.findProgramAddressSync([Buffer.from("deposit_pool"), quest.toBuffer()], PROGRAM_ID)[0];
+  const deriveSubmission = (quest: PublicKey, index: anchor.BN) =>
+    PublicKey.findProgramAddressSync(
+      [Buffer.from("submission"), quest.toBuffer(), index.toArrayLike(Buffer, "le", 8)],
+      PROGRAM_ID
+    )[0];
+  const deriveUserProgress = (quest: PublicKey, user: PublicKey) =>
+    PublicKey.findProgramAddressSync(
+      [Buffer.from("user_progress"), quest.toBuffer(), user.toBuffer()],
+      PROGRAM_ID
+    )[0];
+  const feeVault = () =>
+    PublicKey.findProgramAddressSync([Buffer.from("fee_vault")], PROGRAM_ID)[0];
+  const publicGoodsPool = () =>
+    PublicKey.findProgramAddressSync([Buffer.from("public_goods_pool")], PROGRAM_ID)[0];
+
+  const run = async (label: string, fn: () => Promise<void>) => {
+    try {
+      setError("");
+      setStatus(`${label}...`);
+      await fn();
+      setStatus(`${label} complete`);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+      setStatus(`${label} failed`);
+    }
+  };
+
+  const fetchQuest = async (questText: string) => {
+    const quest = new PublicKey(questText.trim());
+    const slot = await connection.getSlot("confirmed");
+    const chainNow = (await connection.getBlockTime(slot)) ?? Math.floor(Date.now() / 1000);
+    const [account, rewardPoolBalance, depositPoolBalance, feeVaultBalance, publicGoodsPoolBalance] =
+      await Promise.all([
+        readOnlyProgram.account.quest.fetch(quest),
+        connection.getBalance(deriveRewardPool(quest)),
+        connection.getBalance(deriveDepositPool(quest)),
+        connection.getBalance(feeVault()),
+        connection.getBalance(publicGoodsPool()),
+      ]);
+    const currentCycleIndex =
+      enumName(account.mode) === "recurring"
+        ? Math.max(
+            0,
+            Math.floor(
+              (chainNow - account.startAt.toNumber()) /
+                Math.max(1, account.periodSeconds.toNumber())
+            )
+          )
+        : 0;
+    let userProgress: UserProgressAccount | null = null;
+    if (wallet.publicKey) {
+      try {
+        userProgress = await readOnlyProgram.account.userProgress.fetch(
+          deriveUserProgress(quest, wallet.publicKey)
+        );
+      } catch {
+        userProgress = null;
+      }
+    }
     setQuestDetail({
       quest,
       account,
-      vaultBalance: balance / LAMPORTS_PER_SOL,
+      rewardPoolBalance,
+      depositPoolBalance,
+      feeVaultBalance,
+      publicGoodsPoolBalance,
+      chainNow,
+      currentCycleIndex,
+      userProgress,
     });
   };
 
   useEffect(() => {
-    if (!questPdaFromUrl) return;
-    fetchQuestDetail(questPdaFromUrl).catch((err) => {
-      console.error(err);
-      setStatus(`${t("questDetail")} ${t("actionFailed")}`);
-      setErrorMessage(extractErrorMessage(err));
-    });
-  }, [questPdaFromUrl, readOnlyProgram]);
-
-  const requireProgram = () => {
-    if (!program || !wallet.publicKey) {
-      throw new Error("Connect a wallet first");
-    }
-    return { program, publicKey: wallet.publicKey };
-  };
-
-  const runAction = async (label: string, action: () => Promise<void>) => {
-    try {
-      setErrorMessage("");
-      setStatus(`${label}...`);
-      await action();
-      setStatus(`${label} ${t("actionComplete")}`);
-    } catch (err) {
-      console.error(err);
-      const message = extractErrorMessage(err);
-      setStatus(`${label} ${t("actionFailed")}`);
-      setErrorMessage(message);
-    }
-  };
-
-  const createQuest = () =>
-    runAction(t("createQuest"), async () => {
-      const { program, publicKey } = requireProgram();
-      const questIdBn = toQuestId(questId);
-      const quest = deriveQuestPda(publicKey, questIdBn);
-      const vault = deriveVaultPda(quest);
-      const feeVault = deriveFeeVaultPda();
-      const questAddress = quest.toString();
-      const vaultAddress = vault.toString();
-      const feeVaultAddress = feeVault.toString();
-
-      setCreatedQuest(questAddress);
-      setCreatedVault(vaultAddress);
-      setCreatedFeeVault(feeVaultAddress);
-      setShareLink(`${window.location.origin}/quest/${questAddress}`);
-      setSubmitQuest(questAddress);
-      setApproveQuest(questAddress);
-      setClaimQuest(questAddress);
-      setTopUpQuestPda(questAddress);
-      setCancelQuestPda(questAddress);
-      setViewerQuest(questAddress);
-
-      const durationSeconds = toDurationSeconds(
-        durationYears,
-        durationMonths,
-        durationDays,
-        durationHours,
-        durationMinutes
+    const match = window.location.pathname.match(/^\/quest\/([^/]+)$/);
+    if (match) {
+      setViewerQuestInput(match[1]);
+      fetchQuest(match[1]).catch((err) =>
+        setError(err instanceof Error ? err.message : String(err))
       );
+    }
+  }, [readOnlyProgram]);
 
-      await program.methods
-        .createQuest(
-          questIdBn,
-          metadataUri,
-          toPubkey(reviewer),
-          toRewardLamports(rewardSol),
-          durationSeconds
+  const rewardLamportsPreview = solToLamports(rewardPerCompletion || "0");
+  const initialFundingPreview = solToLamports(initialRewardFunding || "0");
+  const depositPreview = solToLamports(depositAmount || "0");
+  const fundRewardPreview = solToLamports(fundReward || "0");
+  const fundDepositPreview = solToLamports(fundDeposit || "0");
+  const requiredDeposit = rewardLamportsPreview.mul(new anchor.BN(Number(queueMax || "0") + 1));
+  const createFee = initialFundingPreview
+    .mul(new anchor.BN(PLATFORM_FEE_BPS))
+    .div(new anchor.BN(BPS_DENOMINATOR));
+  const fundFee = fundRewardPreview
+    .mul(new anchor.BN(PLATFORM_FEE_BPS))
+    .div(new anchor.BN(BPS_DENOMINATOR));
+  const createFundingMultiple = isMultipleOfReward(initialFundingPreview, rewardLamportsPreview);
+  const createDepositMultiple = isMultipleOfReward(depositPreview, rewardLamportsPreview);
+  const createDepositEnough = depositPreview.gte(requiredDeposit);
+  const autoCreateValid =
+    reviewMode === "manual" ||
+    (authorizedVerifier.trim().length > 0 &&
+      verificationSchemaUri.trim().length > 0 &&
+      !/^0+$/.test(templateConfigHash.trim().replace(/^0x/, "")));
+  const createFormValid =
+    createFundingMultiple && createDepositMultiple && createDepositEnough && autoCreateValid;
+  const viewedStatus = questDetail ? enumName(questDetail.account.status) : "";
+  const currentCycleState =
+    questDetail?.userProgress && enumName(questDetail.account.mode) === "recurring"
+      ? questDetail.userProgress.recentCycles.findIndex(
+          (cycle) => cycle.toNumber() === questDetail.currentCycleIndex
         )
-        .accountsPartial({
-          quest,
-          vault,
-          feeVault,
-          publisher: publicKey,
-          systemProgram: SystemProgram.programId,
-        })
-        .rpc();
-    });
+      : -1;
+  const currentUserCycleState =
+    currentCycleState >= 0 && questDetail?.userProgress
+      ? questDetail.userProgress.recentCycleStates[currentCycleState]
+      : 0;
+  const currentUserCanSubmit =
+    !questDetail ||
+    enumName(questDetail.account.mode) === "oneTime"
+      ? !questDetail?.userProgress ||
+        (!questDetail.userProgress.oneTimeCompleted && !questDetail.userProgress.pendingOneTime)
+      : currentUserCycleState === 0;
+  const submitDisabled =
+    !questDetail ||
+    viewedStatus !== "open" ||
+    questDetail.account.pendingCount >= questDetail.account.queueMax ||
+    !currentUserCanSubmit;
+  const fundDisabled = !!questDetail && viewedStatus !== "open";
+  const closeDisabled = !!questDetail && viewedStatus !== "open";
+  const settleDisabled =
+    !questDetail || viewedStatus !== "closing" || questDetail.account.pendingCount !== 0;
+  const cycleWindowRows =
+    questDetail?.userProgress && enumName(questDetail.account.mode) === "recurring"
+      ? questDetail.userProgress.recentCycles
+          .map((cycle, idx) => ({
+            cycle: cycle.toNumber(),
+            state: questDetail.userProgress!.recentCycleStates[idx],
+          }))
+          .filter((row) => row.state !== 0)
+          .sort((a, b) => b.cycle - a.cycle)
+      : [];
 
-  const copyShareLink = () =>
-    runAction(t("copyLink"), async () => {
-      await navigator.clipboard.writeText(shareLink);
-    });
+  const createQuest = async () => {
+    if (!program || !wallet.publicKey) throw new Error("Connect wallet first");
+    const id = bn(questId);
+    const quest = deriveQuest(id, wallet.publicKey);
+    const rewardPool = deriveRewardPool(quest);
+    const depositPool = deriveDepositPool(quest);
+    const duration = durationToSeconds(durationDays, durationHours, durationMinutes);
+    const period = mode === "recurring" ? durationToSeconds(periodDays, periodHours, periodMinutes) : new anchor.BN(0);
+    const reward = solToLamports(rewardPerCompletion);
+    const initialFunding = solToLamports(initialRewardFunding);
+    const deposit = solToLamports(depositAmount);
+    if (duration.toNumber() < MIN_DURATION_SECONDS) throw new Error("Minimum duration is 1 minute");
+    if (!isMultipleOfReward(initialFunding, reward)) {
+      throw new Error("initial_reward_funding must be a multiple of reward_per_completion");
+    }
+    if (!isMultipleOfReward(deposit, reward)) {
+      throw new Error("deposit_amount must be a multiple of reward_per_completion");
+    }
+    if (deposit.lt(requiredDeposit)) throw new Error("Deposit is below required_deposit");
+    const parsedTemplateHash =
+      reviewMode === "autoVerified" ? hexToBytes(templateConfigHash, 32) : Array(32).fill(0);
+    const verifier =
+      reviewMode === "autoVerified"
+        ? new PublicKey(authorizedVerifier.trim())
+        : DEFAULT_PUBKEY;
 
-  const submitProof = () =>
-    runAction(t("submitProof"), async () => {
-      const { program, publicKey } = requireProgram();
-      const quest = toPubkey(submitQuest);
-      const submission = deriveSubmissionPda(quest, publicKey);
+    await program.methods
+      .createQuest(
+        id,
+        mode === "oneTime" ? { oneTime: {} } : { recurring: {} },
+        reviewMode === "manual" ? { manual: {} } : { autoVerified: {} },
+        { [verificationTemplate]: {} } as any,
+        parsedTemplateHash,
+        verificationSchemaUri,
+        verifier,
+        metadataUri,
+        new PublicKey(reviewer.trim()),
+        reward,
+        initialFunding,
+        deposit,
+        duration,
+        period,
+        Number(queueMax)
+      )
+      .accountsPartial({
+        quest,
+        rewardPool,
+        depositPool,
+        feeVault: feeVault(),
+        publicGoodsPool: publicGoodsPool(),
+        publisher: wallet.publicKey,
+        systemProgram: SystemProgram.programId,
+      })
+      .rpc();
 
-      await program.methods
-        .submitProof(proofUri)
-        .accountsPartial({
-          quest,
-          submission,
-          submitter: publicKey,
-          systemProgram: SystemProgram.programId,
-        })
-        .rpc();
+    const shareLink = `${window.location.origin}/quest/${quest.toString()}`;
+    setLastQuest(quest.toString());
+    setLastShareLink(shareLink);
+    setQuestPdaInput(quest.toString());
+    setViewerQuestInput(quest.toString());
+    await fetchQuest(quest.toString());
+  };
 
-      setSubmissionPda(submission.toString());
-      setApproveQuest(quest.toString());
-      setApproveSubmitter(publicKey.toString());
-      setClaimQuest(quest.toString());
-      setClaimSubmission(submission.toString());
-    });
+  const submitProof = async () => {
+    if (!program || !wallet.publicKey) throw new Error("Connect wallet first");
+    const quest = new PublicKey(questPdaInput.trim());
+    const account = await readOnlyProgram.account.quest.fetch(quest);
+    const submission = deriveSubmission(quest, account.nextSubmissionIndex);
+    const userProgress = deriveUserProgress(quest, wallet.publicKey);
+    await program.methods
+      .submitProof(proofUri)
+      .accountsPartial({
+        quest,
+        submission,
+        userProgress,
+        submitter: wallet.publicKey,
+        systemProgram: SystemProgram.programId,
+      })
+      .rpc();
+    setLastSubmission(submission.toString());
+    await fetchQuest(quest.toString());
+  };
 
-  const submitProofFromDetail = () =>
-    runAction(t("submitProof"), async () => {
-      const { program, publicKey } = requireProgram();
-      if (!questDetail) {
-        throw new Error("Quest detail is not loaded");
-      }
-      const submission = deriveSubmissionPda(questDetail.quest, publicKey);
+  const loadSubmission = async (quest: PublicKey): Promise<SubmissionAccount> => {
+    const submission = deriveSubmission(quest, bn(reviewIndexInput));
+    return readOnlyProgram.account.submission.fetch(submission);
+  };
 
-      await program.methods
-        .submitProof(detailProofUri)
-        .accountsPartial({
-          quest: questDetail.quest,
-          submission,
-          submitter: publicKey,
-          systemProgram: SystemProgram.programId,
-        })
-        .rpc();
-
-      setDetailSubmissionPda(submission.toString());
-      setSubmissionPda(submission.toString());
-      setApproveQuest(questDetail.quest.toString());
-      setApproveSubmitter(publicKey.toString());
-      setClaimQuest(questDetail.quest.toString());
-      setClaimSubmission(submission.toString());
-      await fetchQuestDetail(questDetail.quest.toString());
-    });
-
-  const approveSubmission = () =>
-    runAction(t("approveSubmission"), async () => {
-      const { program, publicKey } = requireProgram();
-      const quest = toPubkey(approveQuest);
-      const submitter = toPubkey(approveSubmitter);
-      const submission = deriveSubmissionPda(quest, submitter);
-
+  const approveOrReject = async (approve: boolean) => {
+    if (!program || !wallet.publicKey) throw new Error("Connect wallet first");
+    const quest = new PublicKey(reviewQuestInput.trim());
+    const submission = deriveSubmission(quest, bn(reviewIndexInput));
+    const submissionAccount = await loadSubmission(quest);
+    const userProgress = deriveUserProgress(quest, submissionAccount.submitter);
+    const baseAccounts = {
+      quest,
+      submission,
+      userProgress,
+      reviewer: wallet.publicKey,
+    };
+    if (approve) {
       await program.methods
         .approveSubmission()
         .accountsPartial({
-          quest,
-          submission,
-          reviewer: publicKey,
-        })
-        .rpc();
-
-      setClaimQuest(quest.toString());
-      setClaimSubmission(submission.toString());
-    });
-
-  const claimReward = () =>
-    runAction(t("claimReward"), async () => {
-      const { program, publicKey } = requireProgram();
-      const quest = toPubkey(claimQuest);
-      const submission = toPubkey(claimSubmission);
-      const vault = deriveVaultPda(quest);
-
-      await program.methods
-        .claimReward()
-        .accountsPartial({
-          quest,
-          submission,
-          vault,
-          submitter: publicKey,
+          ...baseAccounts,
+          submitter: submissionAccount.submitter,
+          rewardPool: deriveRewardPool(quest),
+          depositPool: deriveDepositPool(quest),
           systemProgram: SystemProgram.programId,
         })
         .rpc();
+    } else {
+      await program.methods.rejectSubmission().accountsPartial(baseAccounts).rpc();
+    }
+    await fetchQuest(quest.toString());
+  };
 
-      setViewerQuest(quest.toString());
+  const autoApproveSubmission = async () => {
+    if (!program || !wallet.publicKey) throw new Error("Connect wallet first");
+    const quest = new PublicKey(reviewQuestInput.trim());
+    const account = await readOnlyProgram.account.quest.fetch(quest);
+    if (enumName(account.reviewMode) !== "autoVerified") {
+      throw new Error("auto_approve_submission only supports AutoVerified quests");
+    }
+    const submission = deriveSubmission(quest, bn(reviewIndexInput));
+    const submissionAccount = await readOnlyProgram.account.submission.fetch(submission);
+    const userProgress = deriveUserProgress(quest, submissionAccount.submitter);
+    const now = Math.floor(Date.now() / 1000);
+    const verificationResult = {
+      domain: "LootLoopAutoReviewV1",
+      programId: PROGRAM_ID,
+      quest,
+      submissionIndex: submissionAccount.submissionIndex,
+      submitter: submissionAccount.submitter,
+      cycleIndex: submissionAccount.cycleIndex,
+      templateType: account.verificationTemplate,
+      templateConfigHash: Array.from(account.templateConfigHash),
+      externalProofHash: hexToBytes(autoExternalProofHash, 32),
+      verifiedValue: bn(autoVerifiedValue),
+      passed: true,
+      verifiedAt: new anchor.BN(now),
+      expiresAt: bn(autoExpiresAt),
+      nonce: hexToBytes(autoNonce, 32),
+    };
+    const message = serializeVerificationResult(verificationResult);
+    const signature = Uint8Array.from(hexToBytes(autoSignature, 64));
+    const ed25519Ix = Ed25519Program.createInstructionWithPublicKey({
+      publicKey: account.authorizedVerifier.toBytes(),
+      message,
+      signature,
     });
+    const autoIx = await program.methods
+      .autoApproveSubmission(verificationResult as any)
+      .accountsPartial({
+        quest,
+        submission,
+        submitter: submissionAccount.submitter,
+        userProgress,
+        rewardPool: deriveRewardPool(quest),
+        depositPool: deriveDepositPool(quest),
+        instructionsSysvar: SYSVAR_INSTRUCTIONS_PUBKEY,
+        caller: wallet.publicKey,
+        systemProgram: SystemProgram.programId,
+      })
+      .instruction();
+    const tx = new anchor.web3.Transaction().add(ed25519Ix, autoIx);
+    await (program.provider as anchor.AnchorProvider).sendAndConfirm(tx);
+    await fetchQuest(quest.toString());
+  };
 
-  const topUpQuest = () =>
-    runAction(t("topUpQuest"), async () => {
-      const { program, publicKey } = requireProgram();
-      const quest = toPubkey(topUpQuestPda);
-      const vault = deriveVaultPda(quest);
-      const feeVault = deriveFeeVaultPda();
-      const extensionSeconds = toDurationSeconds(
-        extendYears,
-        extendMonths,
-        extendDays,
-        extendHours,
-        extendMinutes,
-        true
-      );
+  const fundQuest = async () => {
+    if (!program || !wallet.publicKey) throw new Error("Connect wallet first");
+    const quest = new PublicKey(fundQuestInput.trim());
+    const account = await readOnlyProgram.account.quest.fetch(quest);
+    if (enumName(account.status) !== "open") throw new Error("fund_quest only supports Open quests");
+    const rewardFunding = solToLamports(fundReward);
+    const additionalDeposit = solToLamports(fundDeposit);
+    if (!isMultipleOfReward(rewardFunding, account.rewardPerCompletion)) {
+      throw new Error("reward_funding_amount must be a multiple of reward_per_completion");
+    }
+    if (!isMultipleOfReward(additionalDeposit, account.rewardPerCompletion)) {
+      throw new Error("additional_deposit_amount must be a multiple of reward_per_completion");
+    }
+    await program.methods
+      .fundQuest(
+        rewardFunding,
+        additionalDeposit,
+        durationToSeconds(extendDays, extendHours, extendMinutes)
+      )
+      .accountsPartial({
+        quest,
+        rewardPool: deriveRewardPool(quest),
+        depositPool: deriveDepositPool(quest),
+        feeVault: feeVault(),
+        publisher: wallet.publicKey,
+        systemProgram: SystemProgram.programId,
+      })
+      .rpc();
+    await fetchQuest(quest.toString());
+  };
 
-      await program.methods
-        .topUpQuest(toRewardLamports(topUpSol), extensionSeconds)
-        .accountsPartial({
-          quest,
-          vault,
-          feeVault,
-          publisher: publicKey,
-          systemProgram: SystemProgram.programId,
-        })
-        .rpc();
+  const closeQuest = async () => {
+    if (!program || !wallet.publicKey) throw new Error("Connect wallet first");
+    const quest = new PublicKey(closeQuestInput.trim());
+    await program.methods
+      .closeQuest()
+      .accountsPartial({
+        quest,
+        rewardPool: deriveRewardPool(quest),
+        depositPool: deriveDepositPool(quest),
+        feeVault: feeVault(),
+        publicGoodsPool: publicGoodsPool(),
+        publisher: wallet.publicKey,
+        systemProgram: SystemProgram.programId,
+      })
+      .rpc();
+    await fetchQuest(quest.toString());
+  };
 
-      setViewerQuest(quest.toString());
-    });
-
-  const cancelQuest = () =>
-    runAction(t("cancelQuest"), async () => {
-      const { program, publicKey } = requireProgram();
-      const quest = toPubkey(cancelQuestPda);
-      const vault = deriveVaultPda(quest);
-      const publicGoodsPool = derivePublicGoodsPoolPda();
-
-      await program.methods
-        .cancelQuest()
-        .accountsPartial({
-          quest,
-          vault,
-          publicGoodsPool,
-          publisher: publicKey,
-          systemProgram: SystemProgram.programId,
-        })
-        .rpc();
-
-      setViewerQuest(quest.toString());
-    });
-
-  const fetchQuest = () =>
-    runAction(t("fetchQuest"), async () => {
-      const { program } = requireProgram();
-      const quest = toPubkey(viewerQuest);
-      const account = await program.account.quest.fetch(quest);
-      const vault = deriveVaultPda(quest);
-      const feeVault = deriveFeeVaultPda();
-      const publicGoodsPool = derivePublicGoodsPoolPda();
-      const balance = await connection.getBalance(vault);
-      const feeBalance = await connection.getBalance(feeVault);
-      const publicGoodsBalance = await connection.getBalance(publicGoodsPool);
-
-      setQuestAccount(account);
-      setVaultBalance(balance / LAMPORTS_PER_SOL);
-      setFeeVaultBalance(feeBalance / LAMPORTS_PER_SOL);
-      setPublicGoodsPoolBalance(publicGoodsBalance / LAMPORTS_PER_SOL);
-    });
+  const settleQuest = async () => {
+    if (!program || !wallet.publicKey) throw new Error("Connect wallet first");
+    const quest = new PublicKey(closeQuestInput.trim());
+    const account = await readOnlyProgram.account.quest.fetch(quest);
+    await program.methods
+      .settleQuest()
+      .accountsPartial({
+        quest,
+        rewardPool: deriveRewardPool(quest),
+        depositPool: deriveDepositPool(quest),
+        publisher: account.publisher,
+        feeVault: feeVault(),
+        publicGoodsPool: publicGoodsPool(),
+        caller: wallet.publicKey,
+        systemProgram: SystemProgram.programId,
+      })
+      .rpc();
+    await fetchQuest(quest.toString());
+  };
 
   return (
     <main>
       <header>
         <div>
-          <h1>{t("app.title")}</h1>
-          <p>{t("app.subtitle")}</p>
+          <h1>{t.title}</h1>
+          <p>{t.subtitle}</p>
         </div>
         <div className="header-actions">
-          <label className="language-select">
-            {t("language")}
-            <select value={language} onChange={(e) => setLanguage(e.target.value as Language)}>
-              <option value="en">English</option>
-              <option value="zh">中文</option>
-            </select>
-          </label>
+          <select
+            className="language-select"
+            value={language}
+            onChange={(event) => setLanguage(event.target.value as Language)}
+          >
+            <option value="en">English</option>
+            <option value="zh">中文</option>
+          </select>
           <WalletMultiButton />
         </div>
       </header>
 
-      <section className="status">
-        <span>{t("wallet")}</span>
-        <strong>{wallet.publicKey?.toString() ?? t("notConnected")}</strong>
-        <span>{t("rpc")}</span>
-        <strong>{connection.rpcEndpoint}</strong>
-        <span>{t("status")}</span>
-        <strong>{status}</strong>
-      </section>
-      {errorMessage && <section className="error">{errorMessage}</section>}
+      <div className="status">
+        <span>{t.wallet}</span>
+        <code>{wallet.publicKey?.toString() ?? "Not connected"}</code>
+        <span>{t.rpc}</span>
+        <code>{RPC_ENDPOINT}</code>
+        <span>{t.status}</span>
+        <code>{status}</code>
+      </div>
+      {error && <section className="error">{error}</section>}
 
-      {questPdaFromUrl && (
-        <QuestDetailView
-          detail={questDetail}
-          proofUri={detailProofUri}
-          onProofUriChange={setDetailProofUri}
-          onSubmitProof={submitProofFromDetail}
-          submissionPda={detailSubmissionPda}
-          t={t}
-        />
-      )}
+      <section className="wide detail">
+        <h2>{t.detail}</h2>
+        <p className="note">{t.fee}</p>
+        <p className="note">{t.closeRule}</p>
+        <p className="note">{t.recurringRule}</p>
+      </section>
 
       <div className="grid">
         <section>
-          <h2>{t("createQuest")}</h2>
-          <p className="note">{t("feeNote")}</p>
-          <label>{t("questId")}<input value={questId} onChange={(e) => setQuestId(e.target.value)} /></label>
-          <label>{t("metadataUri")}<input value={metadataUri} onChange={(e) => setMetadataUri(e.target.value)} /></label>
-          <label>{t("reviewerPubkey")}<input value={reviewer} onChange={(e) => setReviewer(e.target.value)} placeholder={t("walletAddress")} /></label>
-          <label>{t("rewardSol")}<input value={rewardSol} onChange={(e) => setRewardSol(e.target.value)} /></label>
+          <h2>{t.create}</h2>
+          <label>
+            mode
+            <select value={mode} onChange={(event) => setMode(event.target.value as "oneTime" | "recurring")}>
+              <option value="oneTime">OneTime</option>
+              <option value="recurring">Recurring</option>
+            </select>
+          </label>
+          <label>
+            review_mode
+            <select value={reviewMode} onChange={(event) => setReviewMode(event.target.value as "manual" | "autoVerified")}>
+              <option value="manual">Manual</option>
+              <option value="autoVerified">AutoVerified</option>
+            </select>
+          </label>
+          <label>
+            verification_template
+            <select disabled={reviewMode === "manual"} value={verificationTemplate} onChange={(event) => setVerificationTemplate(event.target.value as typeof verificationTemplate)}>
+              <option value="distanceActivity">DistanceActivity</option>
+              <option value="studyDuration">StudyDuration</option>
+              <option value="githubContribution">GithubContribution</option>
+              <option value="attendanceCheckin">AttendanceCheckin</option>
+              <option value="customSigned">CustomSigned</option>
+            </select>
+          </label>
+          <label>authorized_verifier<input disabled={reviewMode === "manual"} value={authorizedVerifier} onChange={(e) => setAuthorizedVerifier(e.target.value)} placeholder="Verifier pubkey" /></label>
+          <label>template_config_hash hex<input disabled={reviewMode === "manual"} value={templateConfigHash} onChange={(e) => setTemplateConfigHash(e.target.value)} /></label>
+          <label>verification_schema_uri<input disabled={reviewMode === "manual"} value={verificationSchemaUri} onChange={(e) => setVerificationSchemaUri(e.target.value)} placeholder="https://.../schema.json" /></label>
+          <label>quest_id<input value={questId} onChange={(e) => setQuestId(e.target.value)} /></label>
+          <label>metadata_uri<input value={metadataUri} onChange={(e) => setMetadataUri(e.target.value)} /></label>
+          <label>reviewer<input value={reviewer} onChange={(e) => setReviewer(e.target.value)} placeholder="Reviewer pubkey" /></label>
+          <label>reward_per_completion SOL<input value={rewardPerCompletion} onChange={(e) => setRewardPerCompletion(e.target.value)} /></label>
+          <label>initial_reward_funding SOL<input value={initialRewardFunding} onChange={(e) => setInitialRewardFunding(e.target.value)} /></label>
+          <label>deposit_amount SOL<input value={depositAmount} onChange={(e) => setDepositAmount(e.target.value)} /></label>
+          <label>queue_max<input value={queueMax} onChange={(e) => setQueueMax(e.target.value)} /></label>
           <div className="duration">
-            <label>{t("years")}<input value={durationYears} onChange={(e) => setDurationYears(e.target.value)} /></label>
-            <label>{t("months")}<input value={durationMonths} onChange={(e) => setDurationMonths(e.target.value)} /></label>
-            <label>{t("days")}<input value={durationDays} onChange={(e) => setDurationDays(e.target.value)} /></label>
-            <label>{t("hours")}<input value={durationHours} onChange={(e) => setDurationHours(e.target.value)} /></label>
-            <label>{t("minutes")}<input value={durationMinutes} onChange={(e) => setDurationMinutes(e.target.value)} /></label>
+            <label>days<input value={durationDays} onChange={(e) => setDurationDays(e.target.value)} /></label>
+            <label>hours<input value={durationHours} onChange={(e) => setDurationHours(e.target.value)} /></label>
+            <label>minutes<input value={durationMinutes} onChange={(e) => setDurationMinutes(e.target.value)} /></label>
           </div>
-          <button onClick={createQuest}>{t("createQuest")}</button>
-          {derivedQuest && (
-            <p className="output">
-              <span>{t("questPda")} (derived from current wallet + Quest ID)</span>
-              <code>{derivedQuest}</code>
-            </p>
-          )}
-          {derivedShareLink && (
-            <p className="output">
-              <span>{t("shareLink")} (derived)</span>
-              <code>{derivedShareLink}</code>
-            </p>
-          )}
-          <Output label={t("questPda")} value={createdQuest} />
-          {shareLink && (
-            <p className="output">
-              <span>{t("shareLink")}</span>
-              <code>{shareLink}</code>
-              <button type="button" onClick={copyShareLink}>{t("copyLink")}</button>
-            </p>
-          )}
-          <Output label={t("vaultPda")} value={createdVault} />
-          <Output label={t("feeVaultPda")} value={createdFeeVault} />
-        </section>
-
-        <section>
-          <h2>{t("submitProof")}</h2>
-          <label>{t("questPda")}<input value={submitQuest} onChange={(e) => setSubmitQuest(e.target.value)} /></label>
-          <label>{t("proofUri")}<input value={proofUri} onChange={(e) => setProofUri(e.target.value)} /></label>
-          <button onClick={submitProof}>{t("submitProof")}</button>
-          <Output label={t("submissionPda")} value={submissionPda} />
-        </section>
-
-        <section>
-          <h2>{t("approveSubmission")}</h2>
-          <label>{t("questPda")}<input value={approveQuest} onChange={(e) => setApproveQuest(e.target.value)} /></label>
-          <label>{t("submitterPubkey")}<input value={approveSubmitter} onChange={(e) => setApproveSubmitter(e.target.value)} /></label>
-          <button onClick={approveSubmission}>{t("approveSubmission")}</button>
-        </section>
-
-        <section>
-          <h2>{t("claimReward")}</h2>
-          <label>{t("questPda")}<input value={claimQuest} onChange={(e) => setClaimQuest(e.target.value)} /></label>
-          <label>{t("submissionPda")}<input value={claimSubmission} onChange={(e) => setClaimSubmission(e.target.value)} /></label>
-          <button onClick={claimReward}>{t("claimReward")}</button>
-        </section>
-
-        <section>
-          <h2>{t("topUpQuest")}</h2>
-          <p className="note">{t("feeNote")}</p>
-          <label>{t("questPda")}<input value={topUpQuestPda} onChange={(e) => setTopUpQuestPda(e.target.value)} /></label>
-          <label>{t("topUpSol")}<input value={topUpSol} onChange={(e) => setTopUpSol(e.target.value)} /></label>
           <div className="duration">
-            <label>{t("years")}<input value={extendYears} onChange={(e) => setExtendYears(e.target.value)} /></label>
-            <label>{t("months")}<input value={extendMonths} onChange={(e) => setExtendMonths(e.target.value)} /></label>
-            <label>{t("days")}<input value={extendDays} onChange={(e) => setExtendDays(e.target.value)} /></label>
-            <label>{t("hours")}<input value={extendHours} onChange={(e) => setExtendHours(e.target.value)} /></label>
-            <label>{t("minutes")}<input value={extendMinutes} onChange={(e) => setExtendMinutes(e.target.value)} /></label>
+            <label>period days<input disabled={mode === "oneTime"} value={periodDays} onChange={(e) => setPeriodDays(e.target.value)} /></label>
+            <label>period hours<input disabled={mode === "oneTime"} value={periodHours} onChange={(e) => setPeriodHours(e.target.value)} /></label>
+            <label>period minutes<input disabled={mode === "oneTime"} value={periodMinutes} onChange={(e) => setPeriodMinutes(e.target.value)} /></label>
           </div>
-          <button onClick={topUpQuest}>{t("topUpQuest")}</button>
+          <p className="note">required_deposit: {lamportsToSol(requiredDeposit)} SOL</p>
+          <p className="note">platform fee: {lamportsToSol(createFee)} SOL</p>
+          {!createFundingMultiple && <p className="note">initial_reward_funding must be a multiple of reward_per_completion.</p>}
+          {!createDepositMultiple && <p className="note">deposit_amount must be a multiple of reward_per_completion.</p>}
+          {!createDepositEnough && <p className="note">deposit_amount must be at least required_deposit.</p>}
+          {reviewMode === "autoVerified" && !autoCreateValid && <p className="note">AutoVerified requires verifier, schema URI, and a non-zero 32-byte template hash.</p>}
+          <button disabled={!createFormValid} onClick={() => run("create_quest", createQuest)}>{t.create}</button>
+          {lastQuest && (
+            <div className="output">
+              <span>Quest PDA</span><code>{lastQuest}</code>
+              <span>Share Link</span><code>{lastShareLink}</code>
+            </div>
+          )}
         </section>
 
         <section>
-          <h2>{t("cancelQuest")}</h2>
-          <p className="note">{t("cancelNote")}</p>
-          <label>{t("questPda")}<input value={cancelQuestPda} onChange={(e) => setCancelQuestPda(e.target.value)} /></label>
-          <button onClick={cancelQuest}>{t("cancelQuest")}</button>
+          <h2>{t.submit}</h2>
+          <label>Quest PDA<input value={questPdaInput} onChange={(e) => setQuestPdaInput(e.target.value)} /></label>
+          <label>proof_uri<input value={proofUri} onChange={(e) => setProofUri(e.target.value)} /></label>
+          {questDetail && <p className="note">pending_count / queue_max: {questDetail.account.pendingCount} / {questDetail.account.queueMax}</p>}
+          {questDetail && enumName(questDetail.account.mode) === "oneTime" && <p className="note">OneTime: each user can complete once.</p>}
+          {questDetail && enumName(questDetail.account.mode) === "recurring" && (
+            <p className="note">
+              current_cycle_index: {questDetail.currentCycleIndex}; your state: {cycleStateLabel(currentUserCycleState)}
+            </p>
+          )}
+          <button disabled={submitDisabled} onClick={() => run("submit_proof", submitProof)}>{t.submit}</button>
+          {lastSubmission && <div className="output"><span>Submission PDA</span><code>{lastSubmission}</code></div>}
+        </section>
+
+        <section>
+          <h2>{t.approve} / {t.reject}</h2>
+          <label>Quest PDA<input value={reviewQuestInput} onChange={(e) => setReviewQuestInput(e.target.value)} /></label>
+          <label>submission_index<input value={reviewIndexInput} onChange={(e) => setReviewIndexInput(e.target.value)} /></label>
+          {questDetail && <p className="note">review_mode: {enumName(questDetail.account.reviewMode)}; next_review_index: {questDetail.account.nextReviewIndex.toString()}</p>}
+          <button onClick={() => run("approve_submission", () => approveOrReject(true))}>{t.approve}</button>{" "}
+          <button onClick={() => run("reject_submission", () => approveOrReject(false))}>{t.reject}</button>
+          <div className="detail-form">
+            <h2>Auto Approve</h2>
+            <p className="note">Paste a verifier signature for the structured LootLoopAutoReviewV1 message. Do not put verifier private keys in the frontend.</p>
+            <label>verified_value<input value={autoVerifiedValue} onChange={(e) => setAutoVerifiedValue(e.target.value)} /></label>
+            <label>external_proof_hash hex<input value={autoExternalProofHash} onChange={(e) => setAutoExternalProofHash(e.target.value)} /></label>
+            <label>expires_at unix seconds<input value={autoExpiresAt} onChange={(e) => setAutoExpiresAt(e.target.value)} /></label>
+            <label>nonce hex<input value={autoNonce} onChange={(e) => setAutoNonce(e.target.value)} /></label>
+            <label>verifier signature hex<input value={autoSignature} onChange={(e) => setAutoSignature(e.target.value)} /></label>
+            <button onClick={() => run("auto_approve_submission", autoApproveSubmission)}>Auto Approve</button>
+          </div>
+        </section>
+
+        <section>
+          <h2>{t.fund}</h2>
+          <label>Quest PDA<input value={fundQuestInput} onChange={(e) => setFundQuestInput(e.target.value)} /></label>
+          <label>reward_funding_amount SOL<input value={fundReward} onChange={(e) => setFundReward(e.target.value)} /></label>
+          <label>additional_deposit_amount SOL<input value={fundDeposit} onChange={(e) => setFundDeposit(e.target.value)} /></label>
+          <div className="duration">
+            <label>extend days<input value={extendDays} onChange={(e) => setExtendDays(e.target.value)} /></label>
+            <label>extend hours<input value={extendHours} onChange={(e) => setExtendHours(e.target.value)} /></label>
+            <label>extend minutes<input value={extendMinutes} onChange={(e) => setExtendMinutes(e.target.value)} /></label>
+          </div>
+          <p className="note">platform fee: {lamportsToSol(fundFee)} SOL</p>
+          {questDetail && fundDisabled && <p className="note">fund_quest is disabled outside Open; Closing cannot return to Open.</p>}
+          <button disabled={fundDisabled} onClick={() => run("fund_quest", fundQuest)}>{t.fund}</button>
+        </section>
+
+        <section>
+          <h2>{t.close}</h2>
+          <label>Quest PDA<input value={closeQuestInput} onChange={(e) => setCloseQuestInput(e.target.value)} /></label>
+          <button disabled={closeDisabled} onClick={() => run("close_quest", closeQuest)}>Close Quest</button>{" "}
+          <button disabled={settleDisabled} onClick={() => run("settle_quest", settleQuest)}>Settle Quest</button>
         </section>
 
         <section className="wide">
-          <h2>{t("stateViewer")}</h2>
-          <label>{t("questPda")}<input value={viewerQuest} onChange={(e) => setViewerQuest(e.target.value)} /></label>
-          <button onClick={fetchQuest}>{t("fetchQuest")}</button>
-          {questAccount && (
+          <h2>{t.viewer}</h2>
+          <label>Quest PDA<input value={viewerQuestInput} onChange={(e) => setViewerQuestInput(e.target.value)} /></label>
+          <button onClick={() => run("fetch_quest", () => fetchQuest(viewerQuestInput))}>Fetch Quest</button>
+          {questDetail && (
             <dl>
-              <Row label={t("field.publisher")} value={questAccount.publisher.toString()} />
-              <Row label={t("field.reviewer")} value={questAccount.reviewer.toString()} />
-              <Row label="quest_id" value={questAccount.questId.toString()} />
-              <Row label={t("field.rewardAmount")} value={`${questAccount.rewardAmount.toString()} lamports`} />
-              <Row label={t("field.totalFunded")} value={`${questAccount.totalFundedAmount.toString()} lamports`} />
-              <Row label={t("field.totalFee")} value={`${questAccount.totalFeePaid.toString()} lamports`} />
-              <Row label={t("field.createdAt")} value={questAccount.createdAt.toString()} />
-              <Row label={t("field.expiresAt")} value={questAccount.expiresAt.toString()} />
-              <Row label={t("field.cancelledAt")} value={questAccount.cancelledAt.toString()} />
-              <Row label={t("field.status")} value={formatStatus(questAccount.status)} />
-              <Row label={t("field.approvedSubmitter")} value={formatPubkey(questAccount.approvedSubmitter)} />
-              <Row label={t("field.submissionCount")} value={questAccount.submissionCount.toString()} />
-              <Row label={t("field.rewardClaimed")} value={String(questAccount.rewardClaimed)} />
-              <Row label={t("field.metadataUri")} value={questAccount.metadataUri} />
-              <Row label={t("field.vaultBalance")} value={vaultBalance === null ? "Unknown" : `${vaultBalance} SOL`} />
-              <Row label={t("field.feeVaultBalance")} value={feeVaultBalance === null ? "Unknown" : `${feeVaultBalance} SOL`} />
-              <Row label={t("field.publicGoodsPoolBalance")} value={publicGoodsPoolBalance === null ? "Unknown" : `${publicGoodsPoolBalance} SOL`} />
+              <dt>quest</dt><dd><code>{questDetail.quest.toString()}</code></dd>
+              <dt>publisher</dt><dd><code>{questDetail.account.publisher.toString()}</code></dd>
+              <dt>reviewer</dt><dd><code>{questDetail.account.reviewer.toString()}</code></dd>
+              <dt>mode/status</dt><dd>{enumName(questDetail.account.mode)} / {enumName(questDetail.account.status)}</dd>
+              <dt>review_mode</dt><dd>{enumName(questDetail.account.reviewMode)}</dd>
+              <dt>verification_template</dt><dd>{enumName(questDetail.account.verificationTemplate)}</dd>
+              <dt>authorized_verifier</dt><dd><code>{questDetail.account.authorizedVerifier.toString()}</code></dd>
+              <dt>template_config_hash</dt><dd><code>{Buffer.from(questDetail.account.templateConfigHash).toString("hex")}</code></dd>
+              <dt>verification_schema_uri</dt><dd><code>{questDetail.account.verificationSchemaUri}</code></dd>
+              <dt>closing_reason</dt><dd>{enumName(questDetail.account.closingReason)}</dd>
+              <dt>current_cycle_index</dt><dd>{questDetail.currentCycleIndex}</dd>
+              <dt>current user cycle state</dt><dd>{cycleStateLabel(currentUserCycleState)}</dd>
+              <dt>current user can submit</dt><dd>{currentUserCanSubmit ? "yes" : "no"}</dd>
+              <dt>reward_per_completion</dt><dd>{lamportsToSol(questDetail.account.rewardPerCompletion)} SOL</dd>
+              <dt>pending / queue</dt><dd>{questDetail.account.pendingCount} / {questDetail.account.queueMax}</dd>
+              <dt>next_submission_index</dt><dd>{questDetail.account.nextSubmissionIndex.toString()}</dd>
+              <dt>next_review_index</dt><dd>{questDetail.account.nextReviewIndex.toString()}</dd>
+              <dt>total_paid_amount</dt><dd>{lamportsToSol(questDetail.account.totalPaidAmount)} SOL</dd>
+              <dt>total_reward_funded</dt><dd>{lamportsToSol(questDetail.account.totalRewardFunded)} SOL</dd>
+              <dt>total_deposit_funded</dt><dd>{lamportsToSol(questDetail.account.totalDepositFunded)} SOL</dd>
+              <dt>total_fee_paid</dt><dd>{lamportsToSol(questDetail.account.totalFeePaid)} SOL</dd>
+              <dt>created_at</dt><dd>{new Date(questDetail.account.startAt.toNumber() * 1000).toLocaleString()}</dd>
+              <dt>expires_at</dt><dd>{new Date(questDetail.account.expiresAt.toNumber() * 1000).toLocaleString()}</dd>
+              <dt>metadata_uri</dt><dd><code>{questDetail.account.metadataUri}</code></dd>
+              <dt>reward_pool</dt><dd>{lamportsToSol(questDetail.rewardPoolBalance)} SOL</dd>
+              <dt>deposit_pool</dt><dd>{lamportsToSol(questDetail.depositPoolBalance)} SOL</dd>
+              <dt>fee_vault</dt><dd>{lamportsToSol(questDetail.feeVaultBalance)} SOL</dd>
+              <dt>public_goods_pool</dt><dd>{lamportsToSol(questDetail.publicGoodsPoolBalance)} SOL</dd>
+              <dt>32-cycle window</dt>
+              <dd>
+                {cycleWindowRows.length === 0
+                  ? "No pending or approved cycles for connected wallet"
+                  : cycleWindowRows
+                      .map((row) => `${row.cycle}: ${cycleStateLabel(row.state)}`)
+                      .join(", ")}
+              </dd>
             </dl>
           )}
         </section>
@@ -836,78 +866,4 @@ export default function App() {
   );
 }
 
-function Output({ label, value }: { label: string; value: string }) {
-  if (!value) return null;
-  return (
-    <p className="output">
-      <span>{label}</span>
-      <code>{value}</code>
-    </p>
-  );
-}
-
-function QuestDetailView({
-  detail,
-  proofUri,
-  onProofUriChange,
-  onSubmitProof,
-  submissionPda,
-  t,
-}: {
-  detail: QuestDetail | null;
-  proofUri: string;
-  onProofUriChange: (value: string) => void;
-  onSubmitProof: () => void;
-  submissionPda: string;
-  t: (key: TranslationKey) => string;
-}) {
-  if (!detail) {
-    return (
-      <section className="wide detail">
-        <h2>{t("questDetail")}</h2>
-        <p>{t("loadingQuest")}</p>
-      </section>
-    );
-  }
-
-  const status = formatStatus(detail.account.status);
-  const nowSeconds = Math.floor(Date.now() / 1000);
-  const isOpen = status === "open";
-  const isNotExpired = nowSeconds <= detail.account.expiresAt.toNumber();
-
-  return (
-    <section className="wide detail">
-      <h2>{t("questDetail")}</h2>
-      <dl>
-        <Row label={t("field.quest")} value={detail.quest.toString()} />
-        <Row label={t("field.publisher")} value={detail.account.publisher.toString()} />
-        <Row label={t("field.reviewer")} value={detail.account.reviewer.toString()} />
-        <Row label={t("field.status")} value={status} />
-        <Row label={t("field.totalFunded")} value={`${detail.account.totalFundedAmount.toString()} lamports`} />
-        <Row label={t("field.totalFee")} value={`${detail.account.totalFeePaid.toString()} lamports`} />
-        <Row label={t("field.createdAt")} value={formatUnix(detail.account.createdAt)} />
-        <Row label={t("field.expiresAt")} value={formatUnix(detail.account.expiresAt)} />
-        <Row label={t("field.metadataUri")} value={detail.account.metadataUri} />
-        <Row label={t("field.vaultBalance")} value={`${detail.vaultBalance} SOL`} />
-      </dl>
-
-      {isOpen && isNotExpired && (
-        <div className="detail-form">
-          <h2>{t("submitProof")}</h2>
-          <label>{t("proofUri")}<input value={proofUri} onChange={(e) => onProofUriChange(e.target.value)} /></label>
-          <button onClick={onSubmitProof}>{t("submitProof")}</button>
-          <Output label={t("submissionPda")} value={submissionPda} />
-        </div>
-      )}
-    </section>
-  );
-}
-
-function Row({ label, value }: { label: string; value: string }) {
-  return (
-    <>
-      <dt>{label}</dt>
-      <dd>{value}</dd>
-    </>
-  );
-}
+export default App;

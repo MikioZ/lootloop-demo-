@@ -29,45 +29,63 @@
           "writable": true
         },
         {
-          "name": "reviewer",
-          "signer": true
-        }
-      ],
-      "args": []
-    },
-    {
-      "name": "cancel_quest",
-      "discriminator": [
-        204,
-        232,
-        50,
-        68,
-        92,
-        169,
-        110,
-        198
-      ],
-      "accounts": [
-        {
-          "name": "quest",
+          "name": "submitter",
           "writable": true
         },
         {
-          "name": "vault",
-          "docs": [
-            "constrained by seeds and it does not store account data."
-          ],
+          "name": "user_progress",
           "writable": true,
           "pda": {
             "seeds": [
               {
                 "kind": "const",
                 "value": [
-                  118,
-                  97,
                   117,
-                  108,
-                  116
+                  115,
+                  101,
+                  114,
+                  95,
+                  112,
+                  114,
+                  111,
+                  103,
+                  114,
+                  101,
+                  115,
+                  115
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "quest"
+              },
+              {
+                "kind": "account",
+                "path": "submission.submitter",
+                "account": "Submission"
+              }
+            ]
+          }
+        },
+        {
+          "name": "reward_pool",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  114,
+                  101,
+                  119,
+                  97,
+                  114,
+                  100,
+                  95,
+                  112,
+                  111,
+                  111,
+                  108
                 ]
               },
               {
@@ -78,10 +96,284 @@
           }
         },
         {
+          "name": "deposit_pool",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  100,
+                  101,
+                  112,
+                  111,
+                  115,
+                  105,
+                  116,
+                  95,
+                  112,
+                  111,
+                  111,
+                  108
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "quest"
+              }
+            ]
+          }
+        },
+        {
+          "name": "reviewer",
+          "signer": true
+        },
+        {
+          "name": "system_program",
+          "address": "11111111111111111111111111111111"
+        }
+      ],
+      "args": []
+    },
+    {
+      "name": "auto_approve_submission",
+      "discriminator": [
+        52,
+        106,
+        80,
+        48,
+        48,
+        209,
+        34,
+        252
+      ],
+      "accounts": [
+        {
+          "name": "quest",
+          "writable": true
+        },
+        {
+          "name": "submission",
+          "writable": true
+        },
+        {
+          "name": "submitter",
+          "writable": true
+        },
+        {
+          "name": "user_progress",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  117,
+                  115,
+                  101,
+                  114,
+                  95,
+                  112,
+                  114,
+                  111,
+                  103,
+                  114,
+                  101,
+                  115,
+                  115
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "quest"
+              },
+              {
+                "kind": "account",
+                "path": "submission.submitter",
+                "account": "Submission"
+              }
+            ]
+          }
+        },
+        {
+          "name": "reward_pool",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  114,
+                  101,
+                  119,
+                  97,
+                  114,
+                  100,
+                  95,
+                  112,
+                  111,
+                  111,
+                  108
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "quest"
+              }
+            ]
+          }
+        },
+        {
+          "name": "deposit_pool",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  100,
+                  101,
+                  112,
+                  111,
+                  115,
+                  105,
+                  116,
+                  95,
+                  112,
+                  111,
+                  111,
+                  108
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "quest"
+              }
+            ]
+          }
+        },
+        {
+          "name": "instructions_sysvar",
+          "address": "Sysvar1nstructions1111111111111111111111111"
+        },
+        {
+          "name": "caller",
+          "signer": true
+        },
+        {
+          "name": "system_program",
+          "address": "11111111111111111111111111111111"
+        }
+      ],
+      "args": [
+        {
+          "name": "verification_result",
+          "type": {
+            "defined": {
+              "name": "VerificationResult"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "close_quest",
+      "discriminator": [
+        70,
+        85,
+        16,
+        198,
+        37,
+        10,
+        13,
+        122
+      ],
+      "accounts": [
+        {
+          "name": "quest",
+          "writable": true
+        },
+        {
+          "name": "reward_pool",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  114,
+                  101,
+                  119,
+                  97,
+                  114,
+                  100,
+                  95,
+                  112,
+                  111,
+                  111,
+                  108
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "quest"
+              }
+            ]
+          }
+        },
+        {
+          "name": "deposit_pool",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  100,
+                  101,
+                  112,
+                  111,
+                  115,
+                  105,
+                  116,
+                  95,
+                  112,
+                  111,
+                  111,
+                  108
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "quest"
+              }
+            ]
+          }
+        },
+        {
+          "name": "fee_vault",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  102,
+                  101,
+                  101,
+                  95,
+                  118,
+                  97,
+                  117,
+                  108,
+                  116
+                ]
+              }
+            ]
+          }
+        },
+        {
           "name": "public_goods_pool",
-          "docs": [
-            "constrained by seeds and it does not store account data."
-          ],
           "writable": true,
           "pda": {
             "seeds": [
@@ -112,63 +404,6 @@
         },
         {
           "name": "publisher",
-          "writable": true,
-          "signer": true
-        },
-        {
-          "name": "system_program",
-          "address": "11111111111111111111111111111111"
-        }
-      ],
-      "args": []
-    },
-    {
-      "name": "claim_reward",
-      "discriminator": [
-        149,
-        95,
-        181,
-        242,
-        94,
-        90,
-        158,
-        162
-      ],
-      "accounts": [
-        {
-          "name": "quest",
-          "writable": true
-        },
-        {
-          "name": "submission"
-        },
-        {
-          "name": "vault",
-          "docs": [
-            "constrained by seeds and it does not store account data."
-          ],
-          "writable": true,
-          "pda": {
-            "seeds": [
-              {
-                "kind": "const",
-                "value": [
-                  118,
-                  97,
-                  117,
-                  108,
-                  116
-                ]
-              },
-              {
-                "kind": "account",
-                "path": "quest"
-              }
-            ]
-          }
-        },
-        {
-          "name": "submitter",
           "writable": true,
           "signer": true
         },
@@ -219,21 +454,53 @@
           }
         },
         {
-          "name": "vault",
-          "docs": [
-            "constrained by seeds and it does not store account data."
-          ],
+          "name": "reward_pool",
           "writable": true,
           "pda": {
             "seeds": [
               {
                 "kind": "const",
                 "value": [
-                  118,
+                  114,
+                  101,
+                  119,
                   97,
-                  117,
-                  108,
-                  116
+                  114,
+                  100,
+                  95,
+                  112,
+                  111,
+                  111,
+                  108
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "quest"
+              }
+            ]
+          }
+        },
+        {
+          "name": "deposit_pool",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  100,
+                  101,
+                  112,
+                  111,
+                  115,
+                  105,
+                  116,
+                  95,
+                  112,
+                  111,
+                  111,
+                  108
                 ]
               },
               {
@@ -245,9 +512,222 @@
         },
         {
           "name": "fee_vault",
-          "docs": [
-            "constrained by seeds and it does not store account data."
-          ],
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  102,
+                  101,
+                  101,
+                  95,
+                  118,
+                  97,
+                  117,
+                  108,
+                  116
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "public_goods_pool",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  112,
+                  117,
+                  98,
+                  108,
+                  105,
+                  99,
+                  95,
+                  103,
+                  111,
+                  111,
+                  100,
+                  115,
+                  95,
+                  112,
+                  111,
+                  111,
+                  108
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "publisher",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "system_program",
+          "address": "11111111111111111111111111111111"
+        }
+      ],
+      "args": [
+        {
+          "name": "quest_id",
+          "type": "u64"
+        },
+        {
+          "name": "mode",
+          "type": {
+            "defined": {
+              "name": "QuestMode"
+            }
+          }
+        },
+        {
+          "name": "review_mode",
+          "type": {
+            "defined": {
+              "name": "ReviewMode"
+            }
+          }
+        },
+        {
+          "name": "verification_template",
+          "type": {
+            "defined": {
+              "name": "VerificationTemplateType"
+            }
+          }
+        },
+        {
+          "name": "template_config_hash",
+          "type": {
+            "array": [
+              "u8",
+              32
+            ]
+          }
+        },
+        {
+          "name": "verification_schema_uri",
+          "type": "string"
+        },
+        {
+          "name": "authorized_verifier",
+          "type": "pubkey"
+        },
+        {
+          "name": "metadata_uri",
+          "type": "string"
+        },
+        {
+          "name": "reviewer",
+          "type": "pubkey"
+        },
+        {
+          "name": "reward_per_completion",
+          "type": "u64"
+        },
+        {
+          "name": "initial_reward_funding",
+          "type": "u64"
+        },
+        {
+          "name": "deposit_amount",
+          "type": "u64"
+        },
+        {
+          "name": "duration_seconds",
+          "type": "i64"
+        },
+        {
+          "name": "period_seconds",
+          "type": "i64"
+        },
+        {
+          "name": "queue_max",
+          "type": "u32"
+        }
+      ]
+    },
+    {
+      "name": "fund_quest",
+      "discriminator": [
+        142,
+        82,
+        156,
+        28,
+        227,
+        44,
+        159,
+        40
+      ],
+      "accounts": [
+        {
+          "name": "quest",
+          "writable": true
+        },
+        {
+          "name": "reward_pool",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  114,
+                  101,
+                  119,
+                  97,
+                  114,
+                  100,
+                  95,
+                  112,
+                  111,
+                  111,
+                  108
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "quest"
+              }
+            ]
+          }
+        },
+        {
+          "name": "deposit_pool",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  100,
+                  101,
+                  112,
+                  111,
+                  115,
+                  105,
+                  116,
+                  95,
+                  112,
+                  111,
+                  111,
+                  108
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "quest"
+              }
+            ]
+          }
+        },
+        {
+          "name": "fee_vault",
           "writable": true,
           "pda": {
             "seeds": [
@@ -280,26 +760,222 @@
       ],
       "args": [
         {
-          "name": "quest_id",
+          "name": "reward_funding_amount",
           "type": "u64"
         },
         {
-          "name": "metadata_uri",
-          "type": "string"
+          "name": "additional_deposit_amount",
+          "type": "u64"
+        },
+        {
+          "name": "extend_duration_seconds",
+          "type": "i64"
+        }
+      ]
+    },
+    {
+      "name": "reject_submission",
+      "discriminator": [
+        2,
+        92,
+        1,
+        81,
+        148,
+        156,
+        6,
+        160
+      ],
+      "accounts": [
+        {
+          "name": "quest",
+          "writable": true
+        },
+        {
+          "name": "submission",
+          "writable": true
+        },
+        {
+          "name": "user_progress",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  117,
+                  115,
+                  101,
+                  114,
+                  95,
+                  112,
+                  114,
+                  111,
+                  103,
+                  114,
+                  101,
+                  115,
+                  115
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "quest"
+              },
+              {
+                "kind": "account",
+                "path": "submission.submitter",
+                "account": "Submission"
+              }
+            ]
+          }
         },
         {
           "name": "reviewer",
-          "type": "pubkey"
-        },
-        {
-          "name": "reward_amount",
-          "type": "u64"
-        },
-        {
-          "name": "duration_seconds",
-          "type": "u64"
+          "signer": true
         }
-      ]
+      ],
+      "args": []
+    },
+    {
+      "name": "settle_quest",
+      "discriminator": [
+        158,
+        192,
+        94,
+        164,
+        245,
+        117,
+        172,
+        31
+      ],
+      "accounts": [
+        {
+          "name": "quest",
+          "writable": true
+        },
+        {
+          "name": "reward_pool",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  114,
+                  101,
+                  119,
+                  97,
+                  114,
+                  100,
+                  95,
+                  112,
+                  111,
+                  111,
+                  108
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "quest"
+              }
+            ]
+          }
+        },
+        {
+          "name": "deposit_pool",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  100,
+                  101,
+                  112,
+                  111,
+                  115,
+                  105,
+                  116,
+                  95,
+                  112,
+                  111,
+                  111,
+                  108
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "quest"
+              }
+            ]
+          }
+        },
+        {
+          "name": "publisher",
+          "writable": true
+        },
+        {
+          "name": "fee_vault",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  102,
+                  101,
+                  101,
+                  95,
+                  118,
+                  97,
+                  117,
+                  108,
+                  116
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "public_goods_pool",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  112,
+                  117,
+                  98,
+                  108,
+                  105,
+                  99,
+                  95,
+                  103,
+                  111,
+                  111,
+                  100,
+                  115,
+                  95,
+                  112,
+                  111,
+                  111,
+                  108
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "caller",
+          "signer": true
+        },
+        {
+          "name": "system_program",
+          "address": "11111111111111111111111111111111"
+        }
+      ],
+      "args": []
     },
     {
       "name": "submit_proof",
@@ -344,6 +1020,41 @@
               },
               {
                 "kind": "account",
+                "path": "quest.next_submission_index",
+                "account": "Quest"
+              }
+            ]
+          }
+        },
+        {
+          "name": "user_progress",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  117,
+                  115,
+                  101,
+                  114,
+                  95,
+                  112,
+                  114,
+                  111,
+                  103,
+                  114,
+                  101,
+                  115,
+                  115
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "quest"
+              },
+              {
+                "kind": "account",
                 "path": "submitter"
               }
             ]
@@ -363,94 +1074,6 @@
         {
           "name": "proof_uri",
           "type": "string"
-        }
-      ]
-    },
-    {
-      "name": "top_up_quest",
-      "discriminator": [
-        28,
-        230,
-        180,
-        78,
-        53,
-        25,
-        63,
-        197
-      ],
-      "accounts": [
-        {
-          "name": "quest",
-          "writable": true
-        },
-        {
-          "name": "vault",
-          "docs": [
-            "constrained by seeds and it does not store account data."
-          ],
-          "writable": true,
-          "pda": {
-            "seeds": [
-              {
-                "kind": "const",
-                "value": [
-                  118,
-                  97,
-                  117,
-                  108,
-                  116
-                ]
-              },
-              {
-                "kind": "account",
-                "path": "quest"
-              }
-            ]
-          }
-        },
-        {
-          "name": "fee_vault",
-          "docs": [
-            "constrained by seeds and it does not store account data."
-          ],
-          "writable": true,
-          "pda": {
-            "seeds": [
-              {
-                "kind": "const",
-                "value": [
-                  102,
-                  101,
-                  101,
-                  95,
-                  118,
-                  97,
-                  117,
-                  108,
-                  116
-                ]
-              }
-            ]
-          }
-        },
-        {
-          "name": "publisher",
-          "writable": true,
-          "signer": true
-        },
-        {
-          "name": "system_program",
-          "address": "11111111111111111111111111111111"
-        }
-      ],
-      "args": [
-        {
-          "name": "top_up_amount",
-          "type": "u64"
-        },
-        {
-          "name": "extend_duration_seconds",
-          "type": "u64"
         }
       ]
     }
@@ -481,6 +1104,19 @@
         178,
         197
       ]
+    },
+    {
+      "name": "UserProgress",
+      "discriminator": [
+        195,
+        16,
+        25,
+        215,
+        192,
+        49,
+        107,
+        204
+      ]
     }
   ],
   "errors": [
@@ -491,128 +1127,168 @@
     },
     {
       "code": 6001,
-      "name": "InvalidStatus",
-      "msg": "The account is not in the required status for this action"
-    },
-    {
-      "code": 6002,
-      "name": "AlreadyClaimed",
-      "msg": "This submission has already been claimed"
-    },
-    {
-      "code": 6003,
-      "name": "NotApproved",
-      "msg": "The submission has not been approved"
-    },
-    {
-      "code": 6004,
-      "name": "RewardAlreadyClaimed",
-      "msg": "The quest reward has already been claimed"
-    },
-    {
-      "code": 6005,
-      "name": "InvalidSubmitter",
-      "msg": "The submitter does not match the approved submitter"
-    },
-    {
-      "code": 6006,
-      "name": "InvalidReviewer",
-      "msg": "The reviewer does not match the quest reviewer"
-    },
-    {
-      "code": 6007,
       "name": "MetadataUriTooLong",
       "msg": "The metadata URI exceeds the maximum allowed length"
     },
     {
-      "code": 6008,
-      "name": "InvalidRewardAmount",
-      "msg": "The reward amount must be greater than zero"
-    },
-    {
-      "code": 6009,
+      "code": 6002,
       "name": "ProofUriTooLong",
       "msg": "The proof URI exceeds the maximum allowed length"
     },
     {
+      "code": 6003,
+      "name": "InvalidRewardAmount",
+      "msg": "The reward per completion is below the minimum amount"
+    },
+    {
+      "code": 6004,
+      "name": "InvalidFundingAmount",
+      "msg": "The reward funding amount is invalid"
+    },
+    {
+      "code": 6005,
+      "name": "InsufficientDeposit",
+      "msg": "The deposit amount is below the required minimum"
+    },
+    {
+      "code": 6006,
+      "name": "RewardFundingNotMultipleOfReward",
+      "msg": "The reward funding amount must be a multiple of reward_per_completion"
+    },
+    {
+      "code": 6007,
+      "name": "DepositNotMultipleOfReward",
+      "msg": "The deposit amount must be a multiple of reward_per_completion"
+    },
+    {
+      "code": 6008,
+      "name": "InsufficientDepositForGuaranteedPayment",
+      "msg": "The deposit pool cannot satisfy the guaranteed full payment"
+    },
+    {
+      "code": 6009,
+      "name": "InvalidQueueMax",
+      "msg": "The queue max must be greater than zero"
+    },
+    {
       "code": 6010,
-      "name": "InvalidQuestStatus",
-      "msg": "The quest is not open for proof submissions"
+      "name": "InvalidQuestMode",
+      "msg": "The quest mode or period configuration is invalid"
     },
     {
       "code": 6011,
-      "name": "MathOverflow",
-      "msg": "Math operation overflowed"
+      "name": "InvalidReviewMode",
+      "msg": "The review mode is invalid for this instruction"
     },
     {
       "code": 6012,
+      "name": "InvalidAuthorizedVerifier",
+      "msg": "The authorized verifier is invalid"
+    },
+    {
+      "code": 6013,
+      "name": "VerificationSchemaUriTooLong",
+      "msg": "The verification schema URI exceeds the maximum allowed length"
+    },
+    {
+      "code": 6014,
+      "name": "InvalidTemplateConfigHash",
+      "msg": "The template config hash is invalid"
+    },
+    {
+      "code": 6015,
+      "name": "InvalidVerificationResult",
+      "msg": "The verification result is invalid"
+    },
+    {
+      "code": 6016,
+      "name": "VerificationExpired",
+      "msg": "The verification result has expired"
+    },
+    {
+      "code": 6017,
+      "name": "InvalidEd25519Instruction",
+      "msg": "The Ed25519 verification instruction is missing or invalid"
+    },
+    {
+      "code": 6018,
+      "name": "InvalidVerifierSignature",
+      "msg": "The verifier signature does not match the expected message"
+    },
+    {
+      "code": 6019,
+      "name": "InvalidQuestStatus",
+      "msg": "The quest is not in the required status"
+    },
+    {
+      "code": 6020,
       "name": "InvalidSubmissionStatus",
       "msg": "The submission is not in the required status"
     },
     {
-      "code": 6013,
+      "code": 6021,
       "name": "InvalidSubmissionQuest",
       "msg": "The submission does not belong to the provided quest"
     },
     {
-      "code": 6014,
-      "name": "AlreadyApproved",
-      "msg": "The quest already has an approved submission"
+      "code": 6022,
+      "name": "InvalidReviewOrder",
+      "msg": "The submission index is not the next review index"
     },
     {
-      "code": 6015,
-      "name": "InsufficientVaultBalance",
-      "msg": "The reward vault does not have enough lamports"
+      "code": 6023,
+      "name": "QueueFull",
+      "msg": "The quest queue is full"
     },
     {
-      "code": 6016,
+      "code": 6024,
+      "name": "OneTimeAlreadySubmitted",
+      "msg": "The user already has a pending or completed one-time submission"
+    },
+    {
+      "code": 6025,
+      "name": "CycleAlreadySubmitted",
+      "msg": "The user already submitted in this recurring cycle"
+    },
+    {
+      "code": 6026,
+      "name": "MathOverflow",
+      "msg": "Math operation overflowed"
+    },
+    {
+      "code": 6027,
       "name": "DurationTooShort",
       "msg": "The quest duration is shorter than the minimum allowed duration"
     },
     {
-      "code": 6017,
+      "code": 6028,
       "name": "QuestExpired",
       "msg": "The quest has expired"
     },
     {
-      "code": 6018,
-      "name": "QuestNotExpired",
-      "msg": "The quest is not expired yet"
-    },
-    {
-      "code": 6019,
-      "name": "InvalidTopUpAmount",
-      "msg": "The top up amount is below the minimum amount"
-    },
-    {
-      "code": 6020,
+      "code": 6029,
       "name": "InvalidDeadlineExtension",
       "msg": "The quest deadline extension is invalid"
     },
     {
-      "code": 6021,
-      "name": "CannotCancelApprovedQuest",
-      "msg": "Cannot cancel an approved quest"
-    },
-    {
-      "code": 6022,
-      "name": "QuestAlreadyCompleted",
-      "msg": "The quest has already been completed"
-    },
-    {
-      "code": 6023,
-      "name": "QuestAlreadyCancelled",
-      "msg": "The quest has already been cancelled"
-    },
-    {
-      "code": 6024,
-      "name": "CannotTopUpApprovedQuest",
-      "msg": "Cannot top up an approved quest"
-    },
-    {
-      "code": 6025,
+      "code": 6030,
       "name": "InvalidFeeAmount",
       "msg": "Invalid fee calculation"
+    },
+    {
+      "code": 6031,
+      "name": "InsufficientPoolBalance",
+      "msg": "The pool does not have enough lamports for this transfer"
+    },
+    {
+      "code": 6032,
+      "name": "PendingSubmissionsRemaining",
+      "msg": "The quest still has pending submissions"
+    },
+    {
+      "code": 6033,
+      "name": "UnreviewedSubmissionsRemaining",
+      "msg": "The quest review index has not caught up to the submission index"
     }
   ],
   "types": [
@@ -634,28 +1310,41 @@
             "type": "pubkey"
           },
           {
-            "name": "reward_amount",
-            "type": "u64"
+            "name": "mode",
+            "type": {
+              "defined": {
+                "name": "QuestMode"
+              }
+            }
           },
           {
-            "name": "total_funded_amount",
-            "type": "u64"
+            "name": "review_mode",
+            "type": {
+              "defined": {
+                "name": "ReviewMode"
+              }
+            }
           },
           {
-            "name": "total_fee_paid",
-            "type": "u64"
+            "name": "verification_template",
+            "type": {
+              "defined": {
+                "name": "VerificationTemplateType"
+              }
+            }
           },
           {
-            "name": "created_at",
-            "type": "i64"
+            "name": "template_config_hash",
+            "type": {
+              "array": [
+                "u8",
+                32
+              ]
+            }
           },
           {
-            "name": "expires_at",
-            "type": "i64"
-          },
-          {
-            "name": "cancelled_at",
-            "type": "i64"
+            "name": "authorized_verifier",
+            "type": "pubkey"
           },
           {
             "name": "status",
@@ -666,30 +1355,130 @@
             }
           },
           {
-            "name": "approved_submitter",
-            "type": {
-              "option": "pubkey"
-            }
-          },
-          {
-            "name": "submission_count",
+            "name": "reward_per_completion",
             "type": "u64"
           },
           {
-            "name": "reward_claimed",
-            "type": "bool"
+            "name": "period_seconds",
+            "type": "i64"
+          },
+          {
+            "name": "start_at",
+            "type": "i64"
+          },
+          {
+            "name": "expires_at",
+            "type": "i64"
+          },
+          {
+            "name": "close_requested_at",
+            "type": "i64"
+          },
+          {
+            "name": "closing_reason",
+            "type": {
+              "defined": {
+                "name": "QuestCloseReason"
+              }
+            }
+          },
+          {
+            "name": "queue_max",
+            "type": "u32"
+          },
+          {
+            "name": "pending_count",
+            "type": "u32"
+          },
+          {
+            "name": "next_submission_index",
+            "type": "u64"
+          },
+          {
+            "name": "next_review_index",
+            "type": "u64"
+          },
+          {
+            "name": "total_submissions",
+            "type": "u64"
+          },
+          {
+            "name": "total_approved",
+            "type": "u64"
+          },
+          {
+            "name": "total_rejected",
+            "type": "u64"
+          },
+          {
+            "name": "total_paid_amount",
+            "type": "u64"
+          },
+          {
+            "name": "total_reward_funded",
+            "type": "u64"
+          },
+          {
+            "name": "total_deposit_funded",
+            "type": "u64"
+          },
+          {
+            "name": "total_fee_paid",
+            "type": "u64"
           },
           {
             "name": "bump",
             "type": "u8"
           },
           {
-            "name": "vault_bump",
+            "name": "reward_pool_bump",
+            "type": "u8"
+          },
+          {
+            "name": "deposit_pool_bump",
             "type": "u8"
           },
           {
             "name": "metadata_uri",
             "type": "string"
+          },
+          {
+            "name": "verification_schema_uri",
+            "type": "string"
+          }
+        ]
+      }
+    },
+    {
+      "name": "QuestCloseReason",
+      "type": {
+        "kind": "enum",
+        "variants": [
+          {
+            "name": "None"
+          },
+          {
+            "name": "EarlyManual"
+          },
+          {
+            "name": "RewardPoolDepleted"
+          },
+          {
+            "name": "Expired"
+          }
+        ]
+      }
+    },
+    {
+      "name": "QuestMode",
+      "type": {
+        "kind": "enum",
+        "variants": [
+          {
+            "name": "OneTime"
+          },
+          {
+            "name": "Recurring"
           }
         ]
       }
@@ -703,16 +1492,24 @@
             "name": "Open"
           },
           {
-            "name": "InReview"
+            "name": "Closing"
           },
           {
-            "name": "Approved"
+            "name": "Closed"
+          }
+        ]
+      }
+    },
+    {
+      "name": "ReviewMode",
+      "type": {
+        "kind": "enum",
+        "variants": [
+          {
+            "name": "Manual"
           },
           {
-            "name": "Completed"
-          },
-          {
-            "name": "Cancelled"
+            "name": "AutoVerified"
           }
         ]
       }
@@ -727,8 +1524,16 @@
             "type": "pubkey"
           },
           {
+            "name": "submission_index",
+            "type": "u64"
+          },
+          {
             "name": "submitter",
             "type": "pubkey"
+          },
+          {
+            "name": "cycle_index",
+            "type": "u64"
           },
           {
             "name": "status",
@@ -739,8 +1544,16 @@
             }
           },
           {
-            "name": "bump",
-            "type": "u8"
+            "name": "requested_reward",
+            "type": "u64"
+          },
+          {
+            "name": "paid_from_reward_pool",
+            "type": "u64"
+          },
+          {
+            "name": "paid_from_deposit_pool",
+            "type": "u64"
           },
           {
             "name": "submitted_at",
@@ -749,6 +1562,10 @@
           {
             "name": "reviewed_at",
             "type": "i64"
+          },
+          {
+            "name": "bump",
+            "type": "u8"
           },
           {
             "name": "proof_uri",
@@ -770,6 +1587,178 @@
           },
           {
             "name": "Rejected"
+          }
+        ]
+      }
+    },
+    {
+      "name": "UserProgress",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "quest",
+            "type": "pubkey"
+          },
+          {
+            "name": "user",
+            "type": "pubkey"
+          },
+          {
+            "name": "total_submitted",
+            "type": "u64"
+          },
+          {
+            "name": "total_approved",
+            "type": "u64"
+          },
+          {
+            "name": "last_submitted_cycle",
+            "type": "u64"
+          },
+          {
+            "name": "last_approved_cycle",
+            "type": "u64"
+          },
+          {
+            "name": "one_time_completed",
+            "type": "bool"
+          },
+          {
+            "name": "pending_one_time",
+            "type": "bool"
+          },
+          {
+            "name": "recent_cycles",
+            "type": {
+              "array": [
+                "u64",
+                32
+              ]
+            }
+          },
+          {
+            "name": "recent_cycle_states",
+            "type": {
+              "array": [
+                "u8",
+                32
+              ]
+            }
+          },
+          {
+            "name": "recent_cycle_cursor",
+            "type": "u8"
+          },
+          {
+            "name": "bump",
+            "type": "u8"
+          }
+        ]
+      }
+    },
+    {
+      "name": "VerificationResult",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "domain",
+            "type": "string"
+          },
+          {
+            "name": "program_id",
+            "type": "pubkey"
+          },
+          {
+            "name": "quest",
+            "type": "pubkey"
+          },
+          {
+            "name": "submission_index",
+            "type": "u64"
+          },
+          {
+            "name": "submitter",
+            "type": "pubkey"
+          },
+          {
+            "name": "cycle_index",
+            "type": "u64"
+          },
+          {
+            "name": "template_type",
+            "type": {
+              "defined": {
+                "name": "VerificationTemplateType"
+              }
+            }
+          },
+          {
+            "name": "template_config_hash",
+            "type": {
+              "array": [
+                "u8",
+                32
+              ]
+            }
+          },
+          {
+            "name": "external_proof_hash",
+            "type": {
+              "array": [
+                "u8",
+                32
+              ]
+            }
+          },
+          {
+            "name": "verified_value",
+            "type": "u64"
+          },
+          {
+            "name": "passed",
+            "type": "bool"
+          },
+          {
+            "name": "verified_at",
+            "type": "i64"
+          },
+          {
+            "name": "expires_at",
+            "type": "i64"
+          },
+          {
+            "name": "nonce",
+            "type": {
+              "array": [
+                "u8",
+                32
+              ]
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "VerificationTemplateType",
+      "type": {
+        "kind": "enum",
+        "variants": [
+          {
+            "name": "DistanceActivity"
+          },
+          {
+            "name": "StudyDuration"
+          },
+          {
+            "name": "GithubContribution"
+          },
+          {
+            "name": "AttendanceCheckin"
+          },
+          {
+            "name": "CustomSigned"
           }
         ]
       }

@@ -2,119 +2,142 @@
 
 LootLoop is an on-chain quest reward protocol on Solana.
 
-LootLoop v0.2 lets a publisher create a quest, lock a SOL reward on-chain, pay a 2% platform fee, accept proof submissions before a deadline, approve one winner, and release the reward through a program-controlled vault.
+LootLoop v0.3 is a Unified Quest Engine: one-time quests and recurring quests share the same queue, review, funding, and settlement model. Review approval automatically pays the submitter from PDA-managed pools; the old `claim_reward` flow has been removed.
 
-## Problem
+## Core Flow
 
-Many real-world and developer task rewards still rely on verbal promises, private agreements, or centralized platforms. This creates several trust gaps:
-
-- Task completers cannot verify whether the reward actually exists.
-- Publishers and completers lack a transparent shared task state.
-- Review decisions are difficult to audit.
-- Reward claiming is not recorded as a verifiable on-chain event.
-- Cancelled or expired quests often have unclear reward handling.
-
-LootLoop turns a task into an on-chain quest with explicit state, deadline, reward vault, fee vault, and cancellation rules.
-
-## v0.2 User Flow
-
-1. The publisher calls `create_quest` with metadata, reviewer, reward amount, and `duration_seconds`.
-2. The program creates the Quest PDA, derives a reward Vault PDA, locks the reward, and sends an extra 2% fee to the Fee Vault PDA.
-3. Before `expires_at`, users call `submit_proof` with a proof URI.
-4. Before `expires_at`, the reviewer or publisher calls `approve_submission`.
-5. The approved submitter calls `claim_reward`.
-6. The quest becomes `Completed`.
-
-Cancellation path:
-
-- If the publisher cancels before `expires_at`, the remaining quest vault reward goes to the Public Goods Pool PDA.
-- If the publisher cancels after `expires_at`, the remaining quest vault reward returns to the publisher.
-- `Approved`, `Completed`, and `Cancelled` quests cannot be cancelled.
-
-Top-up path:
-
-- The publisher can call `top_up_quest` while the quest is still active.
-- Top-up adds reward to the quest vault, optionally extends the deadline, and pays an extra 2% fee to the fee vault.
+1. Publisher calls `create_quest`, chooses `OneTime` or `Recurring`, sets reward, queue size, duration, and reviewer.
+2. Funds enter the Quest `reward_pool`; guarantee funds enter the Quest `deposit_pool`; a separate 2% fee enters `fee_vault`.
+3. Users call `submit_proof`; each submission receives a chain-enforced `submission_index`.
+4. Manual quests are reviewed in FIFO order using `approve_submission` or `reject_submission`.
+5. AutoVerified quests are reviewed in FIFO order using `auto_approve_submission`, after an authorized verifier signs a bound verification result.
+6. Approval automatically pays the submitter the full `reward_per_completion`.
+7. If `reward_pool` cannot pay one full reward, the quest enters irreversible `Closing` and pending approvals are fully paid from `deposit_pool`.
+8. Publisher can call `fund_quest` only while the quest is `Open`.
+9. Publisher can call `close_quest`; when pending submissions are cleared, `settle_quest` finalizes the pools using `closing_reason`.
 
 ## Instructions
-
-See [docs/flow.md](docs/flow.md) for detailed instruction inputs, accounts, permission checks, state changes, fund flow, PDA seeds, and state machine notes.
-
-Current instructions:
 
 - `create_quest`
 - `submit_proof`
 - `approve_submission`
-- `claim_reward`
-- `top_up_quest`
-- `cancel_quest`
+- `auto_approve_submission`
+- `reject_submission`
+- `fund_quest`
+- `close_quest`
+- `settle_quest`
 
 ## PDA Seeds
 
 - Quest PDA: `[b"quest", publisher, quest_id]`
-- Vault PDA: `[b"vault", quest]`
-- Submission PDA: `[b"submission", quest, submitter]`
-- Fee Vault PDA: `[b"fee_vault"]`
-- Public Goods Pool PDA: `[b"public_goods_pool"]`
+- RewardPool PDA: `[b"reward_pool", quest]`
+- DepositPool PDA: `[b"deposit_pool", quest]`
+- Submission PDA: `[b"submission", quest, submission_index]`
+- UserProgress PDA: `[b"user_progress", quest, user]`
+- FeeVault PDA: `[b"fee_vault"]`
+- PublicGoodsPool PDA: `[b"public_goods_pool"]`
 
-## State Model
+## State Machine
 
-### Quest
+- `Open`: accepts new submissions, reviews, and funding.
+- `Closing`: no new submissions; pending submissions can still be reviewed in order.
+- `Closed`: terminal state; no submit, approve, reject, fund, close, or settle again.
+- `closing_reason`: `None`, `EarlyManual`, `RewardPoolDepleted`, or `Expired`; settlement uses this value, not the time of the settle transaction.
 
-Stores quest identity, publisher, reviewer, reward amount, cumulative funded amount, cumulative fee paid, creation time, expiry time, cancellation time, status, approved submitter, submission count, reward claim state, PDA bumps, and metadata URI.
+## Funding Rules
 
-### Submission
+- `create_quest` and `fund_quest` charge a 2% protocol fee on reward funding.
+- The fee is paid separately and is not deducted from the reward pool.
+- `initial_reward_funding`, `reward_funding_amount`, `deposit_amount`, and `additional_deposit_amount` must be integer multiples of `reward_per_completion`.
+- `deposit_amount >= (queue_max + 1) * reward_per_completion`.
+- Approval pays the full `reward_per_completion` automatically:
+  - `Open` and `reward_pool` has a full reward: pay from `reward_pool`
+  - `Open` and `reward_pool` lacks a full reward: enter `Closing` with `RewardPoolDepleted` and pay the full reward from `deposit_pool`
+  - `Closing`: pay approved pending submissions fully from `deposit_pool`
+- There is no `PartiallyPaid` state. If `deposit_pool` cannot satisfy a full guaranteed payment, approval fails with `InsufficientDepositForGuaranteedPayment`.
+- Early close or reward depletion sends remaining reward to `public_goods_pool`; remaining deposit pays a 1% fee and then goes to `public_goods_pool`.
+- Expired close refunds remaining reward and deposit to publisher.
 
-Stores the quest address, submitter, submission status, PDA bump, submitted timestamp, reviewed timestamp, and proof URI.
+## Review Modes
 
-### QuestStatus
+- `Manual`: reviewer or publisher calls `approve_submission`.
+- `AutoVerified`: an authorized verifier signs a structured verification result, then anyone can submit `auto_approve_submission` with the matching Ed25519 verification instruction.
+- Manual approve is rejected for AutoVerified quests with `InvalidReviewMode`.
+- Auto approve is rejected for Manual quests with `InvalidReviewMode`.
+- `reject_submission` remains available to reviewer/publisher in both modes to release invalid or stale pending submissions.
 
-- `Open`: the quest is live and accepts proof submissions before expiry.
-- `InReview`: reserved for a review phase.
-- `Approved`: a submission has been approved and the reward is ready to claim.
-- `Completed`: the reward has been claimed. This is terminal.
-- `Cancelled`: the quest has been cancelled. This is terminal.
+Auto-Review v1 is a signature simulation layer. The Solana program does not read Strava, Garmin, GitHub, or study-platform APIs. A verifier reads off-chain data, decides whether the proof passes, and signs a result bound to:
 
-### SubmissionStatus
+- domain `LootLoopAutoReviewV1`
+- program id
+- quest
+- submission index
+- submitter
+- cycle index
+- verification template type
+- template config hash
+- external proof hash
+- passed flag
+- expiry
+- nonce
 
-- `Pending`: proof has been submitted and awaits review.
-- `Approved`: proof has been accepted.
-- `Rejected`: reserved for a future reject flow.
+The program verifies the previous native Ed25519 instruction through the instructions sysvar, checks the signer equals `authorized_verifier`, checks the signed message matches the provided result, and then reuses the same approve-and-pay logic as manual approval.
 
-## Fee Rules
+MVP limitation: there is no on-chain `UsedProof` PDA yet. Replay prevention for `external_proof_hash` and `nonce` is currently the verifier's responsibility.
 
-- `create_quest` charges a 2% platform fee.
-- `top_up_quest` charges a 2% platform fee.
-- Fees are not deducted from the reward.
-- The publisher pays `reward_amount` to the quest vault plus an additional fee to the fee vault.
-- All amounts are integer lamports. No floating point math is used on-chain.
+Auto-Review roadmap:
+
+- verifier registry
+- multi-verifier threshold
+- `UsedProof` PDA
+- Strava adapter
+- GitHub adapter
+- study platform adapter
+- TEE / ZK proof based verifier
+
+## Recurring Cycle Window
+
+- Recurring quests only accept proof for the current cycle.
+- The program computes `current_cycle_index = (Clock::get()?.unix_timestamp - quest.start_at) / quest.period_seconds`.
+- Users cannot submit a historical cycle or future cycle from the frontend; `submit_proof` has no `cycle_index` argument.
+- `UserProgress` stores only the recent 32-cycle on-chain window.
+- The window records protocol states for duplicate prevention: `0` empty/rejected, `1` pending, `2` approved/paid.
+- Pending or approved in the current cycle blocks another submission in that same cycle.
+- Rejected resets the current cycle state to empty, so the user may resubmit with a new `submission_index`.
+- Older history beyond the 32-cycle window is not a protocol credential. A client, localStorage, IndexedDB, or indexer may keep long-term records for display, search, and stats only.
+- The protocol only trusts on-chain state for submit eligibility, review, reward payment, and settlement.
+
+Future roadmap:
+
+- `PeriodProgress` PDA
+- `UserCycle` PDA
+- off-chain indexer
+- verifiable long-term history queries
 
 ## Completed Features
 
-- Quest creation with deadline
-- Minimum quest duration of 1 minute
-- Reward vault locking
-- 2% platform fee vault
-- Proof submission before expiry
-- Reviewer or publisher approval before expiry
-- Reward claiming by approved submitter
-- Publisher top-up with optional deadline extension
-- Publisher cancellation
-- Public goods pool for pre-expiry cancellation
-- Refund to publisher for post-expiry cancellation
-- Duplicate claim prevention
-- Basic permission checks
-- String length limits for metadata and proof URIs
-- Anchor test coverage
-- Minimal React frontend demo
+- Unified one-time and recurring quest model
+- Queue-indexed submissions
+- FIFO review enforced on-chain
+- Automatic reward payout on approval
+- Deposit-backed compensation
+- Reject flow that releases queue slots
+- Publisher funding and deadline extension
+- Early close and settle flow
+- Fee vault and public goods pool PDAs
+- User progress tracking for one-time and recurring duplicate prevention
+- Manual and AutoVerified review modes
+- Ed25519 verifier-signature auto approval
+- Minimal React devnet frontend demo
 
 ## How To Run
 
 ```bash
 yarn install
+cargo fmt
 anchor build
 npx tsc --noEmit
-anchor test
+anchor test --provider.cluster localnet
 ```
 
 Frontend:
@@ -125,28 +148,27 @@ npm install
 npm run dev
 ```
 
+The frontend is configured for Solana devnet:
+
+```text
+https://api.devnet.solana.com
+```
+
 ## Current Test Result
 
 ```text
-26 passing
+45 passing
 ```
+
+`anchor test` with the current devnet provider requires the upgrade authority wallet to have enough SOL to deploy or upgrade the program. Use localnet for automated tests, or fund the devnet upgrade authority before deploying.
 
 ## Current Limitations
 
 - `fee_vault` only receives fees; there is no withdraw instruction yet.
-- `public_goods_pool` only receives cancelled rewards; there is no withdraw or governance instruction yet.
-- Expiry checks use Solana Clock on-chain, but automated post-expiry tests are limited by local validator time-warp support.
-- The current MVP is single-winner mode.
-- Proof is currently stored as a URI or hash string.
-- One user can submit proof only once per quest.
+- `public_goods_pool` only receives funds; there is no governance or withdrawal instruction yet.
+- Recurring duplicate prevention uses a fixed recent-cycle window.
+- Auto-Review v1 is a verifier signature mock flow and does not integrate real external APIs yet.
+- Auto-Review v1 does not yet store used external proof hashes on-chain.
 - The reviewer is currently a single Pubkey specified when the quest is created.
-
-## Roadmap
-
-- Fee vault and public goods pool governance
-- `reject_submission`
-- Multiple submissions or multi-winner modes
-- Richer metadata schema
-- IPFS, Arweave, and GitHub proof integrations
-- Production-ready frontend flows
-
+- Proof is currently stored as a URI or hash string.
+- Frontend is a hackathon demo UI, not a production app.

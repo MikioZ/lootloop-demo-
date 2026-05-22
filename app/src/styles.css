@@ -164,6 +164,11 @@ button:hover {
   background: #173ea9;
 }
 
+button:disabled {
+  background: #9ca3af;
+  cursor: not-allowed;
+}
+
 .output {
   display: grid;
   gap: 6px;
