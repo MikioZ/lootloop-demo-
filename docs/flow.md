@@ -270,12 +270,12 @@ Rules:
 
 ## Current Tests
 
-The Anchor suite covers create, submit, FIFO approve, reject, deposit fallback, closing, settlement, closed-state rejection, recurring duplicate prevention, expired close, and AutoVerified signature approval.
+The Anchor suite covers create, submit, FIFO approve, reject, deposit fallback, closing, settlement, closed-state rejection, recurring duplicate prevention, expired close, AutoVerified signature approval, and quest-scoped UsedProof replay protection.
 
 Current localnet result:
 
 ```text
-45 passing
+54 passing
 ```
 
 ## Recurring 32-Cycle Window

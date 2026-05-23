@@ -1,0 +1,15 @@
+# LootLoop Protocol Invariants
+
+| Invariant | Why it matters | Enforced by | Tested by | Remaining risk |
+| --- | --- | --- | --- | --- |
+| Full payment on approve | `Approved` should mean the submitter received the complete `reward_per_completion`. | `approve_and_pay_submission`; `InsufficientDepositForGuaranteedPayment`; no `PartiallyPaid` status. | Auto/manual approval payment tests; deposit fallback tests. | Deposit invariant could be broken only by program bug or unexpected lamport movement. |
+| FIFO review | Review order must not be controlled by off-chain UI. | `submission_index == quest.next_review_index`. | Manual, auto, and reject out-of-order tests. | Off-chain UX can still display stale queue data, but chain rejects invalid order. |
+| Queue bound | Prevents unbounded pending liabilities and queue spam. | `pending_count < queue_max` on submit; decrement on approve/reject. | Queue full tests and reject release tests. | Large `queue_max` values are still a publisher configuration risk. |
+| No submit after Closing | Closing means no new work enters the queue. | `submit_proof` requires `QuestStatus::Open`. | Closing submit rejection tests. | Frontend must refresh state to avoid stale submit buttons. |
+| No fund after Closing | Closing is a settlement process, not a recoverable funding state. | `fund_quest` requires `QuestStatus::Open`. | Fund-after-Closing tests. | Publisher cannot recover from accidental early close. |
+| UsedProof quest-scoped replay protection | Prevents one external proof from paying multiple times in the same quest. | `[b"used_proof", quest, external_proof_hash]` init in auto approval. | UsedProof creation, replay, different-quest reuse, and failure rollback tests. | No global deduplication across quests. |
+| AutoVerified signature binding | Prevents signatures from being reused across context. | Ed25519 instruction sysvar parsing; signer check; Borsh message equality; field checks. | Wrong signer, wrong quest, wrong submitter, wrong index, wrong cycle, wrong template hash, TTL, and tamper tests. | Verifier key compromise remains a trust risk. |
+| Closing reason settlement | Funds must settle according to why the quest closed, not when it is settled. | `QuestCloseReason`; `settle_quest` uses `closing_reason`. | Reward depleted early close and expired close tests. | Incorrect `closing_reason` assignment would route funds incorrectly. |
+| Recurring 32-cycle window limitation | Keeps UserProgress bounded on-chain while preventing current-cycle duplicates. | Fixed recent cycle arrays and cycle state updates on submit/approve/reject. | Recurring duplicate, reject resubmit, approve block, and rollover tests. | Long-term history is off-chain and not protocol evidence. |
+| Closed is terminal | Prevents accidental mutation after final settlement. | Instruction status checks. | Closed-state rejection tests. | None beyond future instruction additions needing the same discipline. |
+| Integer-multiple funding | Avoids reward pool dust and ambiguous partial funding. | Create/fund checks for reward multiples. | Funding multiple tests. | UI must convert SOL inputs to lamports before checking. |
