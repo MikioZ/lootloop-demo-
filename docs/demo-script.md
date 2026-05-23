@@ -1,8 +1,16 @@
 # LootLoop Demo Script
 
+## 0. Frontend navigation
+
+Open the React devnet demo and start on `Dashboard`. Use `Refresh` to load Quest accounts from the program, then filter by Open, Closing, Closed, Manual, AutoVerified, OneTime, or Recurring. Use `View` to open `Quest Detail`, or copy a Quest PDA and paste it into any tool tab.
+
+`Quest Detail` is the hub for a selected quest. It shows funding, queue, timing, verifier settings, and the connected wallet's `UserProgress`. The same selected Quest PDA is reused by `Submitter Tools`, `Reviewer Tools`, `Publisher Tools`, and `Protocol State`.
+
+The app supports `/quest/:questPda` links for demos, but it remains a devnet demo UI rather than production software.
+
 ## 1. Publisher creates a quest and funds PDA pools
 
-The publisher calls `create_quest` with a `quest_id`, mode, metadata URI, reviewer Pubkey, reward per completion, initial reward funding, deposit amount, duration, period, and queue size.
+In `Create Quest`, the publisher calls `create_quest` with a `quest_id`, mode, metadata URI, reviewer Pubkey, reward per completion, initial reward funding, deposit amount, duration, period, and queue size.
 
 The program creates the Quest PDA, derives a RewardPool PDA and DepositPool PDA, and collects a 2% fee into the FeeVault PDA. Reward funding and deposit funding must both be integer multiples of `reward_per_completion`, and the initial deposit must cover `(queue_max + 1)` full rewards.
 
@@ -15,7 +23,7 @@ Demo point: rewards and guarantees exist on-chain before anyone starts working.
 
 ## 2. Submitter submits proof URI
 
-The submitter calls `submit_proof` with a proof URI, such as a GitHub pull request, IPFS link, Arweave link, or hash.
+In `Submitter Tools`, the submitter calls `submit_proof` with a proof URI, such as a GitHub pull request, IPFS link, Arweave link, or hash.
 
 The program creates a Submission PDA derived from the Quest and the next chain-enforced `submission_index`.
 
@@ -27,11 +35,13 @@ current_cycle_index = (now - quest.start_at) / quest.period_seconds
 
 The user cannot pass a historical or future `cycle_index`. The proof is always for the current cycle. The on-chain `UserProgress` window records only the recent 32 cycles as empty/rejected, pending, or approved.
 
+The UI shows the connected wallet's `UserProgress` PDA, OneTime completion flag, current cycle state, queue fullness, and whether the user can submit.
+
 Demo point: the work proof is attached to an ordered on-chain review queue, and recurring eligibility is based only on current on-chain state.
 
 ## 3. Manual reviewer approves submission
 
-The reviewer, or the publisher, calls `approve_submission`.
+In `Reviewer Tools`, the reviewer, or the publisher, loads `next_review_index` and calls `approve_submission`.
 
 The program checks that the signer is authorized, the Quest is reviewable, the Submission belongs to the Quest, and the Submission index matches `next_review_index`.
 
@@ -55,10 +65,15 @@ The off-chain verifier reads the external data, decides whether the proof passes
 - template type
 - template config hash
 - external proof hash
+- verified_at
 - expiry
 - nonce
 
-The transaction includes a native Ed25519 verification instruction immediately before `auto_approve_submission`. The LootLoop program reads the instructions sysvar, confirms the signer is `authorized_verifier`, confirms the signed message matches the provided result, and then runs the same approve-and-pay logic as manual approval.
+For AutoVerified quests, `Reviewer Tools` hides manual approve and shows the Auto Approve panel. The operator pastes a verifier-server signature; real verifier private keys must not be hardcoded in the frontend.
+
+The transaction order is optional ComputeBudget instructions, then a native Ed25519 verification instruction, then `auto_approve_submission`. The Ed25519 instruction must be immediately before auto approval. The LootLoop program reads the instructions sysvar, confirms the signer is `authorized_verifier`, confirms the signed Borsh message matches the provided result, enforces a maximum 3600-second verification TTL, checks the quest-scoped `UsedProof` PDA does not already exist, and then runs the same approve-and-pay logic as manual approval.
+
+On success, LootLoop creates `[b"used_proof", quest, external_proof_hash]`. That prevents the same external proof from being used twice in one quest, even by another submitter. Different quests can still reuse the same hash, so the verifier service should keep its own replay checks.
 
 Demo point: automatic approval is still queue-ordered and still pays from PDA pools; only the completion judgment is delegated to a signed off-chain verifier.
 
@@ -71,6 +86,10 @@ The Submission becomes `Rejected`, `pending_count` decreases, and the same user 
 Demo point: the queue cannot be clogged forever by rejected proof.
 
 ## 5. Publisher can close and settle
+
+In `Publisher Tools`, the publisher can call `fund_quest`, `close_quest`, and `settle_quest`.
+
+Funding shows the 2% fee and validates that reward funding and additional deposit are integer multiples of `reward_per_completion`. Fund is only enabled while the quest is `Open`.
 
 The publisher calls `close_quest`.
 
@@ -104,14 +123,15 @@ Current MVP limitations:
 - no real Strava, Garmin, GitHub, or study platform adapter
 - no verifier registry
 - no multi-verifier threshold
-- no on-chain `UsedProof` PDA
-- replay prevention for `external_proof_hash` and `nonce` is verifier-side
+- no global `UsedProof` registry
+- replay prevention beyond a single quest remains verifier-side
 
 Future work:
 
+- global `UsedProof` option
 - verifier registry
+- key rotation
 - multi-verifier threshold
-- `UsedProof` PDA
 - Strava adapter
 - GitHub adapter
 - study platform adapter

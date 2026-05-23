@@ -129,6 +129,8 @@ Checks:
 - Submission must be `Pending`
 - `submission_index == quest.next_review_index`
 - `submission.quest == quest.key()`
+- `verification_result.domain == "LootLoopAutoReviewV1"`
+- `verification_result.program_id == crate::ID`
 - `submission.submitter == verification_result.submitter`
 - `submission.cycle_index == verification_result.cycle_index`
 - `verification_result.quest == quest.key()`
@@ -136,10 +138,21 @@ Checks:
 - `verification_result.template_type == quest.verification_template`
 - `verification_result.template_config_hash == quest.template_config_hash`
 - `verification_result.passed == true`
-- `verification_result.expires_at >= Clock::get()?.unix_timestamp`
-- The previous transaction instruction must be a native Ed25519 verification instruction
+- `verification_result.verified_at <= Clock::get()?.unix_timestamp`
+- `verification_result.expires_at > Clock::get()?.unix_timestamp`
+- `verification_result.expires_at - verification_result.verified_at <= 3600`
+- The immediately previous transaction instruction must be a native Ed25519 verification instruction
 - The Ed25519 signer must equal `quest.authorized_verifier`
-- The signed message must equal the serialized `VerificationResult`
+- The signed message must equal the Borsh serialized `VerificationResult`
+- The quest-scoped `UsedProof` PDA for `[b"used_proof", quest, external_proof_hash]` must not already exist
+
+Transaction order:
+
+1. Optional ComputeBudget instructions.
+2. Native Ed25519 verification instruction.
+3. `auto_approve_submission`.
+
+Any instruction inserted between Ed25519 and `auto_approve_submission` makes the auto approval fail.
 
 Signed message format:
 
@@ -164,12 +177,23 @@ Fund flow:
 - Pays a full `reward_per_completion`
 - If `reward_pool` lacks one full reward, enters `Closing` with `RewardPoolDepleted` and pays from `deposit_pool`
 
+Used proof flow:
+
+- `auto_approve_submission` initializes `UsedProof` only for successful auto approvals.
+- The account stores quest, `external_proof_hash`, submission index, submitter, cycle index, `used_at`, and bump.
+- A rejected submission or failed auto approval does not record the proof.
+- The same `external_proof_hash` cannot be successfully reused in the same quest, including by a different submitter.
+- A different quest can use the same `external_proof_hash`; this MVP is quest-scoped rather than global.
+- Manual approval does not require or create `UsedProof`.
+
 Design boundary:
 
 - The chain does not call Strava, Garmin, GitHub, or learning-platform APIs.
 - The verifier is responsible for off-chain data authenticity.
 - The chain only verifies the authorized verifier signature and context binding.
-- MVP does not create a `UsedProof` PDA; `external_proof_hash` replay prevention is verifier-side for now.
+- `UsedProof` prevents replay inside one quest, but verifier-side replay controls are still recommended for `external_proof_hash` and `nonce`.
+- The chain binds the result to the program, quest, submitter, submission index, cycle index, template config hash, and nonce to reduce cross-task replay risk.
+- Real external data-source integrations should add verifier registry, key rotation, threshold approval, and optionally global used-proof tracking before production launch.
 
 ### `reject_submission`
 
@@ -287,9 +311,10 @@ Roadmap:
 
 ## Auto-Review Roadmap
 
+- global `UsedProof` option
 - verifier registry
+- key rotation
 - multi-verifier threshold
-- `UsedProof` PDA
 - Strava adapter
 - GitHub adapter
 - study platform adapter

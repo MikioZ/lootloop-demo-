@@ -28,6 +28,7 @@ describe("LootLoop v0.3 Unified Quest Engine", () => {
   const PERIOD = new anchor.BN(60);
   const FAST_PERIOD = new anchor.BN(1);
   const RECENT_CYCLE_WINDOW = 32;
+  const MAX_VERIFICATION_TTL_SECONDS = 3_600;
   const REWARD = new anchor.BN(1_000_000);
   const BIG_REWARD = new anchor.BN(5_000_000);
   const PLATFORM_FEE_BPS = new anchor.BN(200);
@@ -50,6 +51,7 @@ describe("LootLoop v0.3 Unified Quest Engine", () => {
   const defaultPubkey = new PublicKey("11111111111111111111111111111111");
   const validTemplateHash = Array.from({ length: 32 }, (_, idx) => idx + 1);
   const zeroHash = Array(32).fill(0);
+  const replayProofHash = Array.from({ length: 32 }, (_, idx) => 90 + idx);
 
   const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -108,6 +110,12 @@ describe("LootLoop v0.3 Unified Quest Engine", () => {
       program.programId
     );
 
+  const deriveUsedProofPda = (quest: PublicKey, externalProofHash: number[] | Buffer) =>
+    PublicKey.findProgramAddressSync(
+      [Buffer.from("used_proof"), quest.toBuffer(), Buffer.from(externalProofHash)],
+      program.programId
+    );
+
   const deriveFeeVaultPda = () =>
     PublicKey.findProgramAddressSync(
       [Buffer.from("fee_vault")],
@@ -127,6 +135,26 @@ describe("LootLoop v0.3 Unified Quest Engine", () => {
       true,
       `expected ${errorName}, got ${String(anyErr)}`
     );
+  };
+
+  const expectUsedProofReplayError = (err: unknown) => {
+    const text = String(err);
+    const code = (err as any).error?.errorCode?.code ?? "";
+    expect(
+      code === "AccountAlreadyInitialized" ||
+        text.includes("already in use") ||
+        text.includes("already initialized") ||
+        text.includes("usedProof")
+    ).to.equal(true, `expected used proof replay error, got ${text}`);
+  };
+
+  const expectUsedProofMissing = async (usedProof: PublicKey) => {
+    try {
+      await program.account.usedProof.fetch(usedProof);
+      expect.fail("UsedProof should not exist");
+    } catch {
+      // Expected: failed transactions roll back Anchor init for UsedProof.
+    }
   };
 
   const transferLamports = async (to: PublicKey, lamports: number) => {
@@ -378,7 +406,12 @@ describe("LootLoop v0.3 Unified Quest Engine", () => {
   ) => {
     const questAccount = await program.account.quest.fetch(quest);
     const submissionAccount = await program.account.submission.fetch(submission);
-    const now = Math.floor(Date.now() / 1000);
+    const verifiedAt = submissionAccount.submittedAt;
+    const externalProofHash = Array.from({ length: 32 }, (_, idx) => 200 - idx);
+    const indexBytes = submissionAccount.submissionIndex.toArrayLike(Buffer, "le", 8);
+    for (let idx = 0; idx < indexBytes.length; idx += 1) {
+      externalProofHash[idx] = indexBytes[idx];
+    }
     return {
       domain: "LootLoopAutoReviewV1",
       programId: program.programId,
@@ -388,22 +421,36 @@ describe("LootLoop v0.3 Unified Quest Engine", () => {
       cycleIndex: submissionAccount.cycleIndex,
       templateType: questAccount.verificationTemplate,
       templateConfigHash: Array.from(questAccount.templateConfigHash),
-      externalProofHash: Array.from({ length: 32 }, (_, idx) => 200 - idx),
+      externalProofHash,
       verifiedValue: new anchor.BN(123),
       passed: true,
-      verifiedAt: new anchor.BN(now),
-      expiresAt: new anchor.BN(now + 300),
+      verifiedAt,
+      expiresAt: verifiedAt.add(new anchor.BN(300)),
       nonce: Array.from({ length: 32 }, (_, idx) => 50 + idx),
       ...overrides,
     };
   };
 
+  type AutoApproveOptions = {
+    signer?: anchor.web3.Keypair;
+    overrides?: Record<string, unknown>;
+    includeEd25519?: boolean;
+    insertInstructionBetween?: boolean;
+    previousInstructionOtherProgram?: boolean;
+    tamperAfterSigning?: Record<string, unknown>;
+  };
+
   const autoApproveSubmission = async (
     quest: PublicKey,
     submission: PublicKey,
-    signer = verifierKeypair,
-    overrides: Record<string, unknown> = {}
+    signerOrOptions: anchor.web3.Keypair | AutoApproveOptions = verifierKeypair,
+    legacyOverrides: Record<string, unknown> = {}
   ) => {
+    const options: AutoApproveOptions =
+      "secretKey" in signerOrOptions
+        ? { signer: signerOrOptions, overrides: legacyOverrides }
+        : signerOrOptions;
+    const signer = options.signer ?? verifierKeypair;
     const submissionAccount = await program.account.submission.fetch(submission);
     const [rewardPool] = deriveRewardPoolPda(quest);
     const [depositPool] = deriveDepositPoolPda(quest);
@@ -414,15 +461,26 @@ describe("LootLoop v0.3 Unified Quest Engine", () => {
     const verificationResult = await buildVerificationResult(
       quest,
       submission,
-      overrides
+      options.overrides ?? {}
     );
     const message = serializeVerificationResult(verificationResult);
     const ed25519Ix = Ed25519Program.createInstructionWithPrivateKey({
       privateKey: signer.secretKey,
       message,
     });
+    const instructionVerificationResult = {
+      ...verificationResult,
+      ...(options.tamperAfterSigning ?? {}),
+    };
+    const [usedProof] = deriveUsedProofPda(
+      quest,
+      instructionVerificationResult.externalProofHash as number[]
+    );
     const autoIx = await program.methods
-      .autoApproveSubmission(verificationResult as any)
+      .autoApproveSubmission(
+        instructionVerificationResult.externalProofHash as number[],
+        instructionVerificationResult as any
+      )
       .accountsPartial({
         quest,
         submission,
@@ -430,13 +488,37 @@ describe("LootLoop v0.3 Unified Quest Engine", () => {
         userProgress,
         rewardPool,
         depositPool,
+        usedProof,
         instructionsSysvar: SYSVAR_INSTRUCTIONS_PUBKEY,
         caller: publisher.publicKey,
         systemProgram: SystemProgram.programId,
       })
       .instruction();
-    const tx = new anchor.web3.Transaction().add(ed25519Ix, autoIx);
+    const tx = new anchor.web3.Transaction();
+    if (options.includeEd25519 !== false) {
+      tx.add(ed25519Ix);
+    }
+    if (options.insertInstructionBetween) {
+      tx.add(
+        SystemProgram.transfer({
+          fromPubkey: publisher.publicKey,
+          toPubkey: reviewerKeypair.publicKey,
+          lamports: 1,
+        })
+      );
+    }
+    if (options.previousInstructionOtherProgram) {
+      tx.add(
+        SystemProgram.transfer({
+          fromPubkey: publisher.publicKey,
+          toPubkey: strangerKeypair.publicKey,
+          lamports: 1,
+        })
+      );
+    }
+    tx.add(autoIx);
     await provider.sendAndConfirm(tx, []);
+    return { verificationResult: instructionVerificationResult, usedProof };
   };
 
   const fundQuest = async (
@@ -881,18 +963,134 @@ describe("LootLoop v0.3 Unified Quest Engine", () => {
     const { submission } = await submitProof(quest, submitterA);
     const before = await provider.connection.getBalance(submitterA.publicKey);
 
-    await autoApproveSubmission(quest, submission);
+    const autoResult = await autoApproveSubmission(quest, submission);
 
     const after = await provider.connection.getBalance(submitterA.publicKey);
     const submissionAccount = await program.account.submission.fetch(submission);
     const questAccount = await program.account.quest.fetch(quest);
+    const usedProofAccount = await program.account.usedProof.fetch(autoResult.usedProof);
     expect(after - before).to.equal(REWARD.toNumber());
     expect(submissionAccount.status).to.deep.equal({ approved: {} });
     expect(submissionAccount.paidFromRewardPool.toNumber()).to.equal(REWARD.toNumber());
     expect(questAccount.totalApproved.toNumber()).to.equal(1);
+    expect(usedProofAccount.quest.toString()).to.equal(quest.toString());
+    expect(Array.from(usedProofAccount.externalProofHash)).to.deep.equal(
+      autoResult.verificationResult.externalProofHash
+    );
+    expect(usedProofAccount.submissionIndex.toString()).to.equal(
+      submissionAccount.submissionIndex.toString()
+    );
+    expect(usedProofAccount.submitter.toString()).to.equal(
+      submissionAccount.submitter.toString()
+    );
+    expect(usedProofAccount.cycleIndex.toString()).to.equal(
+      submissionAccount.cycleIndex.toString()
+    );
+    expect(usedProofAccount.usedAt.toNumber()).to.be.greaterThan(0);
     expect(await provider.connection.getBalance(rewardPool)).to.equal(
       REWARD.mul(new anchor.BN(2)).toNumber()
     );
+  });
+
+  it("prevents replaying the same external_proof_hash within one quest", async () => {
+    const { quest } = await createQuest({
+      reviewMode: autoVerified,
+      templateConfigHash: validTemplateHash,
+      verificationSchemaUri: "https://lootloop.example/schema/auto.json",
+      authorizedVerifier: verifierKeypair.publicKey,
+    });
+    const first = await submitProof(quest, submitterA);
+    await autoApproveSubmission(quest, first.submission, {
+      overrides: { externalProofHash: replayProofHash },
+    });
+
+    const second = await submitProof(quest, submitterB);
+    try {
+      await autoApproveSubmission(quest, second.submission, {
+        overrides: { externalProofHash: replayProofHash },
+      });
+      expect.fail("autoApproveSubmission should reject replayed external proof");
+    } catch (err) {
+      expectUsedProofReplayError(err);
+    }
+  });
+
+  it("allows the same external_proof_hash across different quests", async () => {
+    const firstQuest = await createQuest({
+      reviewMode: autoVerified,
+      templateConfigHash: validTemplateHash,
+      verificationSchemaUri: "https://lootloop.example/schema/auto.json",
+      authorizedVerifier: verifierKeypair.publicKey,
+    });
+    const secondQuest = await createQuest({
+      reviewMode: autoVerified,
+      templateConfigHash: validTemplateHash,
+      verificationSchemaUri: "https://lootloop.example/schema/auto.json",
+      authorizedVerifier: verifierKeypair.publicKey,
+    });
+    const first = await submitProof(firstQuest.quest, submitterA);
+    const second = await submitProof(secondQuest.quest, submitterA);
+
+    await autoApproveSubmission(firstQuest.quest, first.submission, {
+      overrides: { externalProofHash: replayProofHash },
+    });
+    await autoApproveSubmission(secondQuest.quest, second.submission, {
+      overrides: { externalProofHash: replayProofHash },
+    });
+  });
+
+  it("manual approve_submission does not create or require UsedProof", async () => {
+    const { quest } = await createQuest();
+    const { submission } = await submitProof(quest, submitterA);
+    const [usedProof] = deriveUsedProofPda(quest, replayProofHash);
+
+    await approveSubmission(quest, submission, submitterA.publicKey);
+
+    await expectUsedProofMissing(usedProof);
+  });
+
+  it("auto_approve_submission requires an immediately preceding Ed25519 instruction", async () => {
+    const { quest } = await createQuest({
+      reviewMode: autoVerified,
+      templateConfigHash: validTemplateHash,
+      verificationSchemaUri: "https://lootloop.example/schema/auto.json",
+      authorizedVerifier: verifierKeypair.publicKey,
+    });
+
+    const adjacent = await submitProof(quest, submitterA);
+    await autoApproveSubmission(quest, adjacent.submission);
+
+    const missing = await submitProof(quest, submitterB);
+    try {
+      await autoApproveSubmission(quest, missing.submission, {
+        includeEd25519: false,
+      });
+      expect.fail("autoApproveSubmission should reject missing Ed25519 instruction");
+    } catch (err) {
+      expectAnchorError(err, "InvalidEd25519Instruction");
+    }
+    await rejectSubmission(quest, missing.submission, submitterB.publicKey);
+
+    const nonAdjacent = await submitProof(quest, submitterB);
+    try {
+      await autoApproveSubmission(quest, nonAdjacent.submission, {
+        insertInstructionBetween: true,
+      });
+      expect.fail("autoApproveSubmission should reject non-adjacent Ed25519 instruction");
+    } catch (err) {
+      expectAnchorError(err, "InvalidEd25519Instruction");
+    }
+    await rejectSubmission(quest, nonAdjacent.submission, submitterB.publicKey);
+
+    const previousOtherProgram = await submitProof(quest, submitterB);
+    try {
+      await autoApproveSubmission(quest, previousOtherProgram.submission, {
+        previousInstructionOtherProgram: true,
+      });
+      expect.fail("autoApproveSubmission should reject a previous non-Ed25519 instruction");
+    } catch (err) {
+      expectAnchorError(err, "InvalidEd25519Instruction");
+    }
   });
 
   it("auto_approve_submission rejects a signature from the wrong verifier", async () => {
@@ -903,13 +1101,17 @@ describe("LootLoop v0.3 Unified Quest Engine", () => {
       authorizedVerifier: verifierKeypair.publicKey,
     });
     const { submission } = await submitProof(quest, submitterA);
+    const [usedProof] = deriveUsedProofPda(quest, replayProofHash);
 
     try {
-      await autoApproveSubmission(quest, submission, wrongVerifierKeypair);
+      await autoApproveSubmission(quest, submission, wrongVerifierKeypair, {
+        externalProofHash: replayProofHash,
+      });
       expect.fail("autoApproveSubmission should reject wrong verifier");
     } catch (err) {
       expectAnchorError(err, "InvalidVerifierSignature");
     }
+    await expectUsedProofMissing(usedProof);
   });
 
   it("auto_approve_submission rejects verification results bound to the wrong context", async () => {
@@ -920,10 +1122,13 @@ describe("LootLoop v0.3 Unified Quest Engine", () => {
       authorizedVerifier: verifierKeypair.publicKey,
     });
     const cases = [
+      { domain: "LootLoopAutoReviewV0" },
+      { programId: anchor.web3.Keypair.generate().publicKey },
       { quest: anchor.web3.Keypair.generate().publicKey },
       { submitter: submitterB.publicKey },
       { submissionIndex: new anchor.BN(99) },
       { cycleIndex: new anchor.BN(99) },
+      { templateType: { githubContribution: {} } },
       { templateConfigHash: Array.from({ length: 32 }, (_, idx) => 99 - idx) },
     ];
 
@@ -941,7 +1146,28 @@ describe("LootLoop v0.3 Unified Quest Engine", () => {
     }
   });
 
-  it("auto_approve_submission rejects failed or expired verification results", async () => {
+  it("auto_approve_submission rejects a signed-message mismatch", async () => {
+    const { quest } = await createQuest({
+      reviewMode: autoVerified,
+      templateConfigHash: validTemplateHash,
+      verificationSchemaUri: "https://lootloop.example/schema/auto.json",
+      authorizedVerifier: verifierKeypair.publicKey,
+    });
+    const { submission } = await submitProof(quest, submitterA);
+
+    try {
+      await autoApproveSubmission(quest, submission, {
+        tamperAfterSigning: {
+          externalProofHash: Array.from({ length: 32 }, (_, idx) => idx + 9),
+        },
+      });
+      expect.fail("autoApproveSubmission should reject tampered signed messages");
+    } catch (err) {
+      expectAnchorError(err, "InvalidVerifierSignature");
+    }
+  });
+
+  it("auto_approve_submission rejects failed, future, expired, or too-long verification results", async () => {
     const { quest } = await createQuest({
       reviewMode: autoVerified,
       templateConfigHash: validTemplateHash,
@@ -949,24 +1175,60 @@ describe("LootLoop v0.3 Unified Quest Engine", () => {
       authorizedVerifier: verifierKeypair.publicKey,
     });
     const failed = await submitProof(quest, submitterA);
+    const failedHash = Array.from({ length: 32 }, (_, idx) => 40 + idx);
+    const [failedUsedProof] = deriveUsedProofPda(quest, failedHash);
     try {
       await autoApproveSubmission(quest, failed.submission, verifierKeypair, {
+        externalProofHash: failedHash,
         passed: false,
       });
       expect.fail("autoApproveSubmission should reject passed=false");
     } catch (err) {
       expectAnchorError(err, "InvalidVerificationResult");
     }
+    await expectUsedProofMissing(failedUsedProof);
     await rejectSubmission(quest, failed.submission, submitterA.publicKey);
 
+    const future = await submitProof(quest, submitterA);
+    const futureAccount = await program.account.submission.fetch(future.submission);
+    try {
+      await autoApproveSubmission(quest, future.submission, verifierKeypair, {
+        verifiedAt: futureAccount.submittedAt.add(new anchor.BN(600)),
+        expiresAt: futureAccount.submittedAt.add(new anchor.BN(900)),
+      });
+      expect.fail("autoApproveSubmission should reject future verified_at");
+    } catch (err) {
+      expectAnchorError(err, "VerificationFromFuture");
+    }
+    await rejectSubmission(quest, future.submission, submitterA.publicKey);
+
     const expired = await submitProof(quest, submitterA);
+    const expiredHash = Array.from({ length: 32 }, (_, idx) => 120 + idx);
+    const [expiredUsedProof] = deriveUsedProofPda(quest, expiredHash);
     try {
       await autoApproveSubmission(quest, expired.submission, verifierKeypair, {
+        externalProofHash: expiredHash,
         expiresAt: new anchor.BN(1),
       });
       expect.fail("autoApproveSubmission should reject expired results");
     } catch (err) {
       expectAnchorError(err, "VerificationExpired");
+    }
+    await expectUsedProofMissing(expiredUsedProof);
+    await rejectSubmission(quest, expired.submission, submitterA.publicKey);
+
+    const tooLong = await submitProof(quest, submitterA);
+    const tooLongAccount = await program.account.submission.fetch(tooLong.submission);
+    try {
+      await autoApproveSubmission(quest, tooLong.submission, verifierKeypair, {
+        verifiedAt: tooLongAccount.submittedAt,
+        expiresAt: tooLongAccount.submittedAt.add(
+          new anchor.BN(MAX_VERIFICATION_TTL_SECONDS + 1)
+        ),
+      });
+      expect.fail("autoApproveSubmission should reject overly long TTL");
+    } catch (err) {
+      expectAnchorError(err, "VerificationTtlTooLong");
     }
   });
 
@@ -1011,6 +1273,95 @@ describe("LootLoop v0.3 Unified Quest Engine", () => {
     expect(second.index.toNumber()).to.equal(1);
     const questAccount = await program.account.quest.fetch(quest);
     expect(questAccount.pendingCount).to.equal(1);
+  });
+
+  it("allows a rejected AutoVerified submission to reuse an external_proof_hash before successful auto approval", async () => {
+    const { quest } = await createQuest({
+      reviewMode: autoVerified,
+      templateConfigHash: validTemplateHash,
+      verificationSchemaUri: "https://lootloop.example/schema/auto.json",
+      authorizedVerifier: verifierKeypair.publicKey,
+    });
+    const first = await submitProof(quest, submitterA);
+    const [usedProof] = deriveUsedProofPda(quest, replayProofHash);
+    await rejectSubmission(quest, first.submission, submitterA.publicKey);
+    await expectUsedProofMissing(usedProof);
+
+    const second = await submitProof(quest, submitterA);
+    await autoApproveSubmission(quest, second.submission, {
+      overrides: { externalProofHash: replayProofHash },
+    });
+
+    const usedProofAccount = await program.account.usedProof.fetch(usedProof);
+    expect(usedProofAccount.submissionIndex.toNumber()).to.equal(1);
+  });
+
+  it("reject_submission on AutoVerified still requires FIFO order", async () => {
+    const { quest } = await createQuest({
+      reviewMode: autoVerified,
+      templateConfigHash: validTemplateHash,
+      verificationSchemaUri: "https://lootloop.example/schema/auto.json",
+      authorizedVerifier: verifierKeypair.publicKey,
+    });
+    await submitProof(quest, submitterA);
+    const second = await submitProof(quest, submitterB);
+
+    try {
+      await rejectSubmission(quest, second.submission, submitterB.publicKey);
+      expect.fail("rejectSubmission should reject out-of-order AutoVerified submissions");
+    } catch (err) {
+      expectAnchorError(err, "InvalidReviewOrder");
+    }
+  });
+
+  it("reject_submission on AutoVerified Recurring releases the current cycle for resubmit", async () => {
+    const { quest } = await createQuest({
+      mode: recurring,
+      periodSeconds: PERIOD,
+      reviewMode: autoVerified,
+      templateConfigHash: validTemplateHash,
+      verificationSchemaUri: "https://lootloop.example/schema/auto.json",
+      authorizedVerifier: verifierKeypair.publicKey,
+    });
+    const first = await submitProof(quest, submitterA);
+    const firstAccount = await program.account.submission.fetch(first.submission);
+    await rejectSubmission(quest, first.submission, submitterA.publicKey);
+    let progress = await program.account.userProgress.fetch(first.userProgress);
+    expect(cycleState(progress, firstAccount.cycleIndex)).to.equal(0);
+
+    const second = await submitProof(quest, submitterA);
+    const secondAccount = await program.account.submission.fetch(second.submission);
+    progress = await program.account.userProgress.fetch(second.userProgress);
+    expect(second.index.toNumber()).to.equal(1);
+    expect(secondAccount.cycleIndex.toString()).to.equal(firstAccount.cycleIndex.toString());
+    expect(cycleState(progress, secondAccount.cycleIndex)).to.equal(1);
+  });
+
+  it("auto_approve_submission in Closing pays only from deposit_pool", async () => {
+    const { quest } = await createQuest({
+      reviewMode: autoVerified,
+      templateConfigHash: validTemplateHash,
+      verificationSchemaUri: "https://lootloop.example/schema/auto.json",
+      authorizedVerifier: verifierKeypair.publicKey,
+      rewardPerCompletion: BIG_REWARD,
+      initialRewardFunding: BIG_REWARD,
+      queueMax: 3,
+      depositAmount: BIG_REWARD.mul(new anchor.BN(4)),
+    });
+    const first = await submitProof(quest, submitterA);
+    const second = await submitProof(quest, submitterB);
+    const third = await submitProof(quest, submitterC);
+
+    await autoApproveSubmission(quest, first.submission);
+    await autoApproveSubmission(quest, second.submission);
+    await autoApproveSubmission(quest, third.submission);
+
+    const questAccount = await program.account.quest.fetch(quest);
+    const thirdAccount = await program.account.submission.fetch(third.submission);
+    expect(questAccount.status).to.deep.equal({ closing: {} });
+    expect(thirdAccount.status).to.deep.equal({ approved: {} });
+    expect(thirdAccount.paidFromRewardPool.toNumber()).to.equal(0);
+    expect(thirdAccount.paidFromDepositPool.toNumber()).to.equal(BIG_REWARD.toNumber());
   });
 
   it("automatically pays the submitter from the reward pool on approval", async () => {

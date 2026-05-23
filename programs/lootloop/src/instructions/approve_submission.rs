@@ -3,8 +3,9 @@ use solana_instructions_sysvar::{load_current_index_checked, load_instruction_at
 
 use crate::{
     error::ErrorCode, Quest, QuestCloseReason, QuestMode, QuestStatus, ReviewMode, Submission,
-    SubmissionStatus, UserProgress, VerificationResult, AUTO_REVIEW_DOMAIN, DEPOSIT_POOL_SEED,
-    REWARD_POOL_SEED, USER_PROGRESS_SEED,
+    SubmissionStatus, UsedProof, UserProgress, VerificationResult, AUTO_REVIEW_DOMAIN,
+    DEPOSIT_POOL_SEED, MAX_VERIFICATION_TTL_SECONDS, REWARD_POOL_SEED, USED_PROOF_SEED,
+    USER_PROGRESS_SEED,
 };
 
 const ED25519_SIGNATURE_OFFSETS_START: usize = 2;
@@ -55,6 +56,7 @@ pub struct ApproveSubmission<'info> {
 }
 
 #[derive(Accounts)]
+#[instruction(external_proof_hash: [u8; 32])]
 pub struct AutoApproveSubmission<'info> {
     #[account(mut)]
     pub quest: Account<'info, Quest>,
@@ -89,10 +91,24 @@ pub struct AutoApproveSubmission<'info> {
     )]
     pub deposit_pool: UncheckedAccount<'info>,
 
+    #[account(
+        init,
+        payer = caller,
+        space = 8 + UsedProof::INIT_SPACE,
+        seeds = [
+            USED_PROOF_SEED,
+            quest.key().as_ref(),
+            external_proof_hash.as_ref()
+        ],
+        bump
+    )]
+    pub used_proof: Account<'info, UsedProof>,
+
     /// CHECK: Instruction sysvar is read to verify the previous Ed25519 instruction.
     #[account(address = INSTRUCTIONS_SYSVAR_ID)]
     pub instructions_sysvar: UncheckedAccount<'info>,
 
+    #[account(mut)]
     pub caller: Signer<'info>,
     pub system_program: Program<'info, System>,
 }
@@ -122,6 +138,7 @@ pub fn approve_submission_handler(ctx: Context<ApproveSubmission>) -> Result<()>
 
 pub fn auto_approve_submission_handler(
     ctx: Context<AutoApproveSubmission>,
+    external_proof_hash: [u8; 32],
     verification_result: VerificationResult,
 ) -> Result<()> {
     let now = Clock::get()?.unix_timestamp;
@@ -186,12 +203,28 @@ pub fn auto_approve_submission_handler(
         ErrorCode::InvalidVerificationResult
     );
     require!(
+        verification_result.external_proof_hash == external_proof_hash,
+        ErrorCode::InvalidVerificationResult
+    );
+    require!(
         verification_result.passed,
         ErrorCode::InvalidVerificationResult
     );
     require!(
-        verification_result.expires_at >= now,
+        verification_result.verified_at <= now,
+        ErrorCode::VerificationFromFuture
+    );
+    require!(
+        verification_result.expires_at > now,
         ErrorCode::VerificationExpired
+    );
+    let verification_ttl = verification_result
+        .expires_at
+        .checked_sub(verification_result.verified_at)
+        .ok_or(ErrorCode::MathOverflow)?;
+    require!(
+        verification_ttl <= MAX_VERIFICATION_TTL_SECONDS,
+        ErrorCode::VerificationTtlTooLong
     );
 
     let mut message = Vec::new();
@@ -212,7 +245,18 @@ pub fn auto_approve_submission_handler(
         &ctx.accounts.reward_pool,
         &ctx.accounts.deposit_pool,
         &ctx.accounts.system_program,
-    )
+    )?;
+
+    let used_proof = &mut ctx.accounts.used_proof;
+    used_proof.quest = ctx.accounts.quest.key();
+    used_proof.external_proof_hash = verification_result.external_proof_hash;
+    used_proof.submission_index = ctx.accounts.submission.submission_index;
+    used_proof.submitter = ctx.accounts.submission.submitter;
+    used_proof.cycle_index = ctx.accounts.submission.cycle_index;
+    used_proof.used_at = now;
+    used_proof.bump = ctx.bumps.used_proof;
+
+    Ok(())
 }
 
 pub fn approve_and_pay_submission<'info>(

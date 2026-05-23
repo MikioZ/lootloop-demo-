@@ -34,8 +34,12 @@ pub enum ErrorCode {
     InvalidTemplateConfigHash, // AutoVerified 模板 hash 不能全 0。
     #[msg("The verification result is invalid")]
     InvalidVerificationResult, // verifier 结果上下文不匹配或 passed=false。
+    #[msg("The verification result was produced in the future")]
+    VerificationFromFuture, // verified_at 不能晚于当前链上时间。
     #[msg("The verification result has expired")]
     VerificationExpired, // verifier 签名结果过期。
+    #[msg("The verification result TTL is too long")]
+    VerificationTtlTooLong, // expires_at - verified_at 超过协议允许的最大 TTL。
     #[msg("The Ed25519 verification instruction is missing or invalid")]
     InvalidEd25519Instruction, // 缺少或无法解析 Ed25519 原生验签指令。
     #[msg("The verifier signature does not match the expected message")]

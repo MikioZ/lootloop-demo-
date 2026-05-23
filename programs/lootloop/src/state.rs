@@ -198,6 +198,27 @@ impl UserProgress {
     }
 }
 
+#[account]
+pub struct UsedProof {
+    pub quest: Pubkey,                 // 该外部证明被使用在哪个 Quest 下。
+    pub external_proof_hash: [u8; 32], // verifier 绑定的链下证明 hash。
+    pub submission_index: u64,         // 首次成功使用该证明的 submission index。
+    pub submitter: Pubkey,             // 首次成功使用该证明的 submitter。
+    pub cycle_index: u64,              // 首次成功使用该证明的周期；OneTime 为 0。
+    pub used_at: i64,                  // 成功 auto approve 的链上时间。
+    pub bump: u8,                      // UsedProof PDA bump。
+}
+
+impl UsedProof {
+    pub const INIT_SPACE: usize = 32 // quest，不包含 Anchor discriminator 的 8 字节。
+        + 32 // external_proof_hash
+        + 8 // submission_index
+        + 32 // submitter
+        + 8 // cycle_index
+        + 8 // used_at
+        + 1; // bump
+}
+
 #[derive(AnchorSerialize, AnchorDeserialize, Clone, PartialEq, Eq)]
 pub enum QuestMode {
     OneTime,   // 一次性任务，同一个用户只能完成一次。

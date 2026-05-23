@@ -77,19 +77,31 @@ Auto-Review v1 is a signature simulation layer. The Solana program does not read
 - verification template type
 - template config hash
 - external proof hash
+- verified_at
 - passed flag
 - expiry
 - nonce
 
-The program verifies the previous native Ed25519 instruction through the instructions sysvar, checks the signer equals `authorized_verifier`, checks the signed message matches the provided result, and then reuses the same approve-and-pay logic as manual approval.
+The program verifies the immediately previous native Ed25519 instruction through the instructions sysvar, checks the signer equals `authorized_verifier`, checks the signed Borsh message matches the provided result, enforces `verified_at <= now`, `expires_at > now`, and `expires_at - verified_at <= 3600`, then reuses the same approve-and-pay logic as manual approval.
 
-MVP limitation: there is no on-chain `UsedProof` PDA yet. Replay prevention for `external_proof_hash` and `nonce` is currently the verifier's responsibility.
+Transaction order for Auto-Review v1 must be:
+
+1. Optional ComputeBudget instructions.
+2. Native Ed25519 verification instruction.
+3. `auto_approve_submission`.
+
+The Ed25519 instruction must be directly adjacent to `auto_approve_submission`.
+
+Auto-Review v1 also creates a quest-scoped `UsedProof` PDA at `[b"used_proof", quest, external_proof_hash]` after a successful auto approval. The same `external_proof_hash` can only be successfully used once within the same quest, even by a different submitter. Different quests may reuse the same `external_proof_hash`; global replay protection is not part of this MVP. Manual review does not use `UsedProof`.
+
+The verifier service should still keep its own replay controls for `external_proof_hash` and `nonce`. The chain binds verifier results to the program, quest, submitter, submission index, cycle index, template config hash, and nonce to reduce cross-context replay risk.
 
 Auto-Review roadmap:
 
+- global `UsedProof` option
 - verifier registry
+- key rotation
 - multi-verifier threshold
-- `UsedProof` PDA
 - Strava adapter
 - GitHub adapter
 - study platform adapter
@@ -128,7 +140,22 @@ Future roadmap:
 - User progress tracking for one-time and recurring duplicate prevention
 - Manual and AutoVerified review modes
 - Ed25519 verifier-signature auto approval
-- Minimal React devnet frontend demo
+- Quest-scoped UsedProof replay protection
+- React devnet frontend with dashboard, quest detail, submitter, reviewer, publisher, and state-viewer tabs
+
+## Frontend Demo
+
+The React app is still a devnet demo, not a production UI. It is organized into product-facing tabs:
+
+- `Dashboard`: loads Quest accounts with `program.account.quest.all()`, supports status/mode/review filters, and lets users view or copy Quest PDAs.
+- `Quest Detail`: shows publisher, reviewer, mode, review mode, verifier settings, queue, timing, pool balances, totals, and the connected wallet's `UserProgress`.
+- `Create Quest`: creates Manual or AutoVerified quests with deposit, fee, duration, recurring period, and integer-multiple funding validation.
+- `Submitter Tools`: submits a proof URI for the selected quest, shows current cycle and duplicate-prevention state, and disables submission when the queue is full, expired, closed, pending, or approved.
+- `Reviewer Tools`: loads `next_review_index`, displays the current Submission, supports Manual approve/reject, and shows the Auto Approve mock verifier-signature panel for AutoVerified quests.
+- `Publisher Tools`: funds Open quests, closes quests, and settles Closing quests with publisher permission hints.
+- `Protocol State`: raw state viewer for Quest, pools, counters, and the 32-cycle user window.
+
+Quest detail links can be opened at `/quest/:questPda`.
 
 ## How To Run
 

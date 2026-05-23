@@ -63,10 +63,12 @@ pub mod lootloop {
 
     pub fn auto_approve_submission(
         ctx: Context<AutoApproveSubmission>,
+        external_proof_hash: [u8; 32],
         verification_result: VerificationResult,
     ) -> Result<()> {
         crate::instructions::approve_submission::auto_approve_submission_handler(
             ctx,
+            external_proof_hash,
             verification_result,
         )
     }

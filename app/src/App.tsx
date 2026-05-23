@@ -23,10 +23,22 @@ type SubmissionAccount = Awaited<
 type UserProgressAccount = Awaited<
   ReturnType<Program<Lootloop>["account"]["userProgress"]["fetch"]>
 >;
+type Tab =
+  | "dashboard"
+  | "detail"
+  | "create"
+  | "submitter"
+  | "reviewer"
+  | "publisher"
+  | "state";
+type QuestRow = { publicKey: PublicKey; account: QuestAccount };
+type LoadedSubmission = { pda: PublicKey; account: SubmissionAccount };
+type UiError = { message: string; details: string };
 
 const PROGRAM_ID = new PublicKey("CQmvWxzKoxVrVQq798qY1tm699ivLJcvC5XWw8o4DTUj");
 const RPC_ENDPOINT = "https://api.devnet.solana.com";
 const MIN_DURATION_SECONDS = 60;
+const MAX_VERIFICATION_TTL_SECONDS = 3_600;
 const PLATFORM_FEE_BPS = 200;
 const BPS_DENOMINATOR = 10_000;
 const DEFAULT_PUBKEY = new PublicKey("11111111111111111111111111111111");
@@ -53,7 +65,7 @@ const copy = {
     recurringRule:
       "Recurring quests only accept proof for the current on-chain cycle. Historical catch-up and future-cycle submissions are not supported. UserProgress keeps a 32-cycle on-chain window for pending/approved duplicate prevention; older history may live in localStorage, IndexedDB, or an indexer for display only, never as a protocol credential.",
     autoRule:
-      "Auto-Review v1 is a verifier signature mock flow. The program does not read Strava, Garmin, GitHub, or study-platform APIs; an authorized verifier checks off-chain data, signs a bound result, and the chain verifies that signature before paying.",
+      "Auto-Review v1 is a mock verifier signature flow. Do not hardcode real verifier private keys in the frontend. A real verifier server should check off-chain data, sign a bound result, and keep verification TTL at 1 hour or less.",
   },
   zh: {
     title: "LootLoop v0.3",
@@ -76,7 +88,7 @@ const copy = {
     recurringRule:
       "周期任务只能提交链上当前周期 proof，不支持补交历史周期或提交未来周期。UserProgress 只保存 32 周期链上窗口，用于 pending/approved 去重；更早历史可存在 localStorage、IndexedDB 或 indexer，仅用于展示查询，不能作为协议凭证。",
     autoRule:
-      "Auto-Review v1 是 verifier 签名模拟流程。链上程序不读取 Strava、Garmin、GitHub 或学习平台 API；authorized verifier 在链下判断并签名，链上验证签名后发奖。",
+      "Auto-Review v1 是 verifier 签名模拟流程。不要在前端硬编码真实 verifier 私钥。真实环境应由 verifier server 检查链下数据、签名绑定结果，并把验证 TTL 控制在 1 小时内。",
   },
 };
 
@@ -182,7 +194,15 @@ function App() {
   );
   const t = copy[language];
   const [status, setStatus] = useState("Ready");
-  const [error, setError] = useState("");
+  const [error, setError] = useState<UiError | null>(null);
+  const [activeTab, setActiveTab] = useState<Tab>("dashboard");
+  const [questRows, setQuestRows] = useState<QuestRow[]>([]);
+  const [questListFilter, setQuestListFilter] = useState("all");
+  const [questListLoading, setQuestListLoading] = useState(false);
+  const [questListError, setQuestListError] = useState("");
+  const [currentReviewSubmission, setCurrentReviewSubmission] =
+    useState<LoadedSubmission | null>(null);
+  const [reviewLoadStatus, setReviewLoadStatus] = useState("");
 
   const [mode, setMode] = useState<"oneTime" | "recurring">("oneTime");
   const [reviewMode, setReviewMode] = useState<"manual" | "autoVerified">("manual");
@@ -212,6 +232,9 @@ function App() {
   const [reviewIndexInput, setReviewIndexInput] = useState("0");
   const [autoVerifiedValue, setAutoVerifiedValue] = useState("100");
   const [autoExternalProofHash, setAutoExternalProofHash] = useState("11".repeat(32));
+  const [autoVerifiedAt, setAutoVerifiedAt] = useState(() =>
+    String(Math.floor(Date.now() / 1000))
+  );
   const [autoExpiresAt, setAutoExpiresAt] = useState(() =>
     String(Math.floor(Date.now() / 1000) + 300)
   );
@@ -226,6 +249,8 @@ function App() {
   const [closeQuestInput, setCloseQuestInput] = useState("");
   const [viewerQuestInput, setViewerQuestInput] = useState("");
   const [lastQuest, setLastQuest] = useState("");
+  const [lastRewardPool, setLastRewardPool] = useState("");
+  const [lastDepositPool, setLastDepositPool] = useState("");
   const [lastShareLink, setLastShareLink] = useState("");
   const [lastSubmission, setLastSubmission] = useState("");
   const [questDetail, setQuestDetail] = useState<{
@@ -291,20 +316,81 @@ function App() {
       [Buffer.from("user_progress"), quest.toBuffer(), user.toBuffer()],
       PROGRAM_ID
     )[0];
+  const deriveUsedProof = (quest: PublicKey, externalProofHash: number[] | Buffer) =>
+    PublicKey.findProgramAddressSync(
+      [Buffer.from("used_proof"), quest.toBuffer(), Buffer.from(externalProofHash)],
+      PROGRAM_ID
+    )[0];
   const feeVault = () =>
     PublicKey.findProgramAddressSync([Buffer.from("fee_vault")], PROGRAM_ID)[0];
   const publicGoodsPool = () =>
     PublicKey.findProgramAddressSync([Buffer.from("public_goods_pool")], PROGRAM_ID)[0];
 
+  const shortKey = (value: PublicKey | string) => {
+    const text = value.toString();
+    return `${text.slice(0, 4)}…${text.slice(-4)}`;
+  };
+
+  const formatTime = (seconds: anchor.BN | number) => {
+    const value = typeof seconds === "number" ? seconds : seconds.toNumber();
+    return new Date(value * 1000).toLocaleString();
+  };
+
+  const copyText = async (text: string) => {
+    await navigator.clipboard.writeText(text);
+    setStatus("Copied");
+  };
+
+  const mapError = (err: unknown, label: string): UiError => {
+    const anyErr = err as any;
+    const code = anyErr.error?.errorCode?.code ?? "";
+    const raw = err instanceof Error ? err.message : String(err);
+    const friendly: Record<string, string> = {
+      QueueFull: "The quest queue is full. Try again after a reviewer clears pending submissions.",
+      InvalidQuestStatus: "This quest is not in a status that allows this action.",
+      Unauthorized: "Your wallet is not authorized for this action.",
+      InvalidReviewMode: "This action does not match the quest review mode.",
+      InvalidVerifierSignature: "The verifier signature does not match the expected message.",
+      VerificationExpired: "The verification result has expired.",
+      RewardFundingNotMultipleOfReward:
+        "Reward funding must be an integer multiple of reward_per_completion.",
+      DepositNotMultipleOfReward:
+        "Deposit funding must be an integer multiple of reward_per_completion.",
+      InsufficientDeposit: "Deposit is below the required amount for this queue size.",
+    };
+    let message = friendly[code] ?? raw;
+    if (
+      label === "auto_approve_submission" &&
+      /already in use|already initialized|AccountAlreadyInitialized|usedProof/i.test(raw)
+    ) {
+      message = "This external proof has already been used for this quest.";
+    }
+    return { message, details: raw };
+  };
+
   const run = async (label: string, fn: () => Promise<void>) => {
     try {
-      setError("");
+      setError(null);
       setStatus(`${label}...`);
       await fn();
       setStatus(`${label} complete`);
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      setError(mapError(err, label));
       setStatus(`${label} failed`);
+    }
+  };
+
+  const loadQuestList = async () => {
+    setQuestListLoading(true);
+    setQuestListError("");
+    try {
+      const rows = await readOnlyProgram.account.quest.all();
+      rows.sort((a, b) => b.account.startAt.toNumber() - a.account.startAt.toNumber());
+      setQuestRows(rows);
+    } catch (err) {
+      setQuestListError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setQuestListLoading(false);
     }
   };
 
@@ -351,16 +437,51 @@ function App() {
       currentCycleIndex,
       userProgress,
     });
+    setQuestPdaInput(quest.toString());
+    setReviewQuestInput(quest.toString());
+    setFundQuestInput(quest.toString());
+    setCloseQuestInput(quest.toString());
+    setViewerQuestInput(quest.toString());
+    await loadCurrentReviewSubmission(quest.toString(), account);
+  };
+
+  const loadCurrentReviewSubmission = async (
+    questText = reviewQuestInput,
+    questAccount?: QuestAccount
+  ) => {
+    setReviewLoadStatus("Loading review item...");
+    setCurrentReviewSubmission(null);
+    try {
+      const quest = new PublicKey(questText.trim());
+      const account = questAccount ?? (await readOnlyProgram.account.quest.fetch(quest));
+      setReviewQuestInput(quest.toString());
+      setReviewIndexInput(account.nextReviewIndex.toString());
+      if (account.pendingCount === 0) {
+        setReviewLoadStatus("No pending submissions");
+        return;
+      }
+      const submission = deriveSubmission(quest, account.nextReviewIndex);
+      const submissionAccount = await readOnlyProgram.account.submission.fetch(submission);
+      setCurrentReviewSubmission({ pda: submission, account: submissionAccount });
+      setReviewLoadStatus("Review item loaded");
+    } catch (err) {
+      setReviewLoadStatus(err instanceof Error ? err.message : String(err));
+    }
   };
 
   useEffect(() => {
     const match = window.location.pathname.match(/^\/quest\/([^/]+)$/);
     if (match) {
+      setActiveTab("detail");
       setViewerQuestInput(match[1]);
       fetchQuest(match[1]).catch((err) =>
-        setError(err instanceof Error ? err.message : String(err))
+        setError(mapError(err, "fetch_quest"))
       );
     }
+  }, [readOnlyProgram]);
+
+  useEffect(() => {
+    loadQuestList();
   }, [readOnlyProgram]);
 
   const rewardLamportsPreview = solToLamports(rewardPerCompletion || "0");
@@ -378,14 +499,29 @@ function App() {
   const createFundingMultiple = isMultipleOfReward(initialFundingPreview, rewardLamportsPreview);
   const createDepositMultiple = isMultipleOfReward(depositPreview, rewardLamportsPreview);
   const createDepositEnough = depositPreview.gte(requiredDeposit);
+  const createDuration = durationToSeconds(durationDays, durationHours, durationMinutes);
+  const createPeriod =
+    mode === "recurring"
+      ? durationToSeconds(periodDays, periodHours, periodMinutes)
+      : new anchor.BN(0);
+  const createDurationValid = createDuration.gte(new anchor.BN(MIN_DURATION_SECONDS));
+  const createPeriodValid = mode === "oneTime" || createPeriod.gt(new anchor.BN(0));
   const autoCreateValid =
     reviewMode === "manual" ||
     (authorizedVerifier.trim().length > 0 &&
       verificationSchemaUri.trim().length > 0 &&
       !/^0+$/.test(templateConfigHash.trim().replace(/^0x/, "")));
   const createFormValid =
-    createFundingMultiple && createDepositMultiple && createDepositEnough && autoCreateValid;
+    createFundingMultiple &&
+    createDepositMultiple &&
+    createDepositEnough &&
+    autoCreateValid &&
+    createDurationValid &&
+    createPeriodValid;
   const viewedStatus = questDetail ? enumName(questDetail.account.status) : "";
+  const selectedQuestExpired = questDetail
+    ? questDetail.chainNow >= questDetail.account.expiresAt.toNumber()
+    : false;
   const currentCycleState =
     questDetail?.userProgress && enumName(questDetail.account.mode) === "recurring"
       ? questDetail.userProgress.recentCycles.findIndex(
@@ -405,12 +541,41 @@ function App() {
   const submitDisabled =
     !questDetail ||
     viewedStatus !== "open" ||
+    selectedQuestExpired ||
     questDetail.account.pendingCount >= questDetail.account.queueMax ||
     !currentUserCanSubmit;
-  const fundDisabled = !!questDetail && viewedStatus !== "open";
-  const closeDisabled = !!questDetail && viewedStatus !== "open";
+  const isPublisher =
+    !!questDetail &&
+    !!wallet.publicKey &&
+    questDetail.account.publisher.toString() === wallet.publicKey.toString();
+  const fundDisabled = !questDetail || viewedStatus !== "open" || !isPublisher;
+  const closeDisabled = !questDetail || viewedStatus !== "open" || !isPublisher;
   const settleDisabled =
     !questDetail || viewedStatus !== "closing" || questDetail.account.pendingCount !== 0;
+  const autoVerifiedAtNumber = /^\d+$/.test(autoVerifiedAt.trim())
+    ? Number(autoVerifiedAt)
+    : 0;
+  const autoExpiresAtNumber = /^\d+$/.test(autoExpiresAt.trim())
+    ? Number(autoExpiresAt)
+    : 0;
+  const autoNow = Math.floor(Date.now() / 1000);
+  const autoExpiresFuture = autoExpiresAtNumber > autoNow;
+  const autoTtlSeconds = autoExpiresAtNumber - autoVerifiedAtNumber;
+  const autoTtlValid =
+    autoVerifiedAtNumber <= autoNow &&
+    autoExpiresAtNumber > autoVerifiedAtNumber &&
+    autoTtlSeconds <= MAX_VERIFICATION_TTL_SECONDS;
+  const autoUsedProofPreview = (() => {
+    try {
+      if (!reviewQuestInput.trim()) return "";
+      return deriveUsedProof(
+        new PublicKey(reviewQuestInput.trim()),
+        hexToBytes(autoExternalProofHash, 32)
+      ).toString();
+    } catch {
+      return "";
+    }
+  })();
   const cycleWindowRows =
     questDetail?.userProgress && enumName(questDetail.account.mode) === "recurring"
       ? questDetail.userProgress.recentCycles
@@ -421,6 +586,42 @@ function App() {
           .filter((row) => row.state !== 0)
           .sort((a, b) => b.cycle - a.cycle)
       : [];
+  const filteredQuestRows = questRows.filter((row) => {
+    const statusName = enumName(row.account.status);
+    const modeName = enumName(row.account.mode);
+    const reviewName = enumName(row.account.reviewMode);
+    return (
+      questListFilter === "all" ||
+      statusName === questListFilter ||
+      modeName === questListFilter ||
+      reviewName === questListFilter
+    );
+  });
+  const selectedQuestPda = questDetail?.quest.toString() ?? "";
+  const selectedReviewMode = questDetail ? enumName(questDetail.account.reviewMode) : "";
+  const selectedMode = questDetail ? enumName(questDetail.account.mode) : "";
+  const selectedUserProgressPda =
+    questDetail && wallet.publicKey ? deriveUserProgress(questDetail.quest, wallet.publicKey) : null;
+  const currentUserStateText =
+    selectedMode === "oneTime"
+      ? questDetail?.userProgress?.oneTimeCompleted
+        ? "Completed"
+        : questDetail?.userProgress?.pendingOneTime
+          ? "Pending"
+          : "Empty / Rejected"
+      : cycleStateLabel(currentUserCycleState);
+  const fundRewardMultiple =
+    questDetail && isMultipleOfReward(fundRewardPreview, questDetail.account.rewardPerCompletion);
+  const fundDepositMultiple =
+    questDetail && isMultipleOfReward(fundDepositPreview, questDetail.account.rewardPerCompletion);
+  const canManualApprove =
+    selectedReviewMode === "manual" && !!currentReviewSubmission && viewedStatus !== "closed";
+  const canAutoApprove =
+    selectedReviewMode === "autoVerified" &&
+    !!currentReviewSubmission &&
+    autoExpiresFuture &&
+    autoTtlValid &&
+    viewedStatus !== "closed";
 
   const createQuest = async () => {
     if (!program || !wallet.publicKey) throw new Error("Connect wallet first");
@@ -479,10 +680,14 @@ function App() {
 
     const shareLink = `${window.location.origin}/quest/${quest.toString()}`;
     setLastQuest(quest.toString());
+    setLastRewardPool(rewardPool.toString());
+    setLastDepositPool(depositPool.toString());
     setLastShareLink(shareLink);
     setQuestPdaInput(quest.toString());
     setViewerQuestInput(quest.toString());
     await fetchQuest(quest.toString());
+    await loadQuestList();
+    setActiveTab("detail");
   };
 
   const submitProof = async () => {
@@ -503,6 +708,7 @@ function App() {
       .rpc();
     setLastSubmission(submission.toString());
     await fetchQuest(quest.toString());
+    await loadQuestList();
   };
 
   const loadSubmission = async (quest: PublicKey): Promise<SubmissionAccount> => {
@@ -537,6 +743,7 @@ function App() {
       await program.methods.rejectSubmission().accountsPartial(baseAccounts).rpc();
     }
     await fetchQuest(quest.toString());
+    await loadQuestList();
   };
 
   const autoApproveSubmission = async () => {
@@ -549,7 +756,24 @@ function App() {
     const submission = deriveSubmission(quest, bn(reviewIndexInput));
     const submissionAccount = await readOnlyProgram.account.submission.fetch(submission);
     const userProgress = deriveUserProgress(quest, submissionAccount.submitter);
-    const now = Math.floor(Date.now() / 1000);
+    const slot = await connection.getSlot("confirmed");
+    const now = (await connection.getBlockTime(slot)) ?? Math.floor(Date.now() / 1000);
+    const verifiedAt = bn(autoVerifiedAt);
+    const expiresAt = bn(autoExpiresAt);
+    if (verifiedAt.gt(new anchor.BN(now))) {
+      throw new Error("verified_at cannot be in the future");
+    }
+    if (expiresAt.lte(new anchor.BN(now))) {
+      throw new Error("expires_at must be greater than current time");
+    }
+    if (
+      expiresAt.lte(verifiedAt) ||
+      expiresAt.sub(verifiedAt).gt(new anchor.BN(MAX_VERIFICATION_TTL_SECONDS))
+    ) {
+      throw new Error("verification TTL must be greater than 0 and no more than 3600 seconds");
+    }
+    const externalProofHash = hexToBytes(autoExternalProofHash, 32);
+    const usedProof = deriveUsedProof(quest, externalProofHash);
     const verificationResult = {
       domain: "LootLoopAutoReviewV1",
       programId: PROGRAM_ID,
@@ -559,11 +783,11 @@ function App() {
       cycleIndex: submissionAccount.cycleIndex,
       templateType: account.verificationTemplate,
       templateConfigHash: Array.from(account.templateConfigHash),
-      externalProofHash: hexToBytes(autoExternalProofHash, 32),
+      externalProofHash,
       verifiedValue: bn(autoVerifiedValue),
       passed: true,
-      verifiedAt: new anchor.BN(now),
-      expiresAt: bn(autoExpiresAt),
+      verifiedAt,
+      expiresAt,
       nonce: hexToBytes(autoNonce, 32),
     };
     const message = serializeVerificationResult(verificationResult);
@@ -574,7 +798,7 @@ function App() {
       signature,
     });
     const autoIx = await program.methods
-      .autoApproveSubmission(verificationResult as any)
+      .autoApproveSubmission(externalProofHash, verificationResult as any)
       .accountsPartial({
         quest,
         submission,
@@ -582,6 +806,7 @@ function App() {
         userProgress,
         rewardPool: deriveRewardPool(quest),
         depositPool: deriveDepositPool(quest),
+        usedProof,
         instructionsSysvar: SYSVAR_INSTRUCTIONS_PUBKEY,
         caller: wallet.publicKey,
         systemProgram: SystemProgram.programId,
@@ -590,6 +815,7 @@ function App() {
     const tx = new anchor.web3.Transaction().add(ed25519Ix, autoIx);
     await (program.provider as anchor.AnchorProvider).sendAndConfirm(tx);
     await fetchQuest(quest.toString());
+    await loadQuestList();
   };
 
   const fundQuest = async () => {
@@ -621,6 +847,7 @@ function App() {
       })
       .rpc();
     await fetchQuest(quest.toString());
+    await loadQuestList();
   };
 
   const closeQuest = async () => {
@@ -639,6 +866,7 @@ function App() {
       })
       .rpc();
     await fetchQuest(quest.toString());
+    await loadQuestList();
   };
 
   const settleQuest = async () => {
@@ -659,6 +887,7 @@ function App() {
       })
       .rpc();
     await fetchQuest(quest.toString());
+    await loadQuestList();
   };
 
   return (
@@ -689,18 +918,185 @@ function App() {
         <span>{t.status}</span>
         <code>{status}</code>
       </div>
-      {error && <section className="error">{error}</section>}
+      {error && (
+        <section className="error">
+          <strong>{error.message}</strong>
+          <details>
+            <summary>Raw details</summary>
+            <pre>{error.details}</pre>
+          </details>
+        </section>
+      )}
 
-      <section className="wide detail">
-        <h2>{t.detail}</h2>
-        <p className="note">{t.fee}</p>
-        <p className="note">{t.closeRule}</p>
-        <p className="note">{t.recurringRule}</p>
+      <nav className="tabs">
+        {[
+          ["dashboard", "Dashboard"],
+          ["detail", "Quest Detail"],
+          ["create", "Create Quest"],
+          ["submitter", "Submitter Tools"],
+          ["reviewer", "Reviewer Tools"],
+          ["publisher", "Publisher Tools"],
+          ["state", "Protocol State"],
+        ].map(([key, label]) => (
+          <button
+            key={key}
+            className={activeTab === key ? "tab active" : "tab"}
+            onClick={() => setActiveTab(key as Tab)}
+          >
+            {label}
+          </button>
+        ))}
+      </nav>
+
+      <section className="notice">
+        <p>{t.fee}</p>
+        <p>{t.closeRule}</p>
+        <p>{t.recurringRule}</p>
+        <p>{t.autoRule}</p>
       </section>
 
-      <div className="grid">
+      {activeTab === "dashboard" && (
+        <section>
+          <div className="section-head">
+            <div>
+              <h2>Dashboard / Quest List</h2>
+              <p className="note">Browse Quest accounts owned by the current program.</p>
+            </div>
+            <button onClick={() => run("load_quests", loadQuestList)}>Refresh</button>
+          </div>
+          <div className="filters">
+            {["all", "open", "closing", "closed", "manual", "autoVerified", "oneTime", "recurring"].map(
+              (filter) => (
+                <button
+                  key={filter}
+                  className={questListFilter === filter ? "chip active" : "chip"}
+                  onClick={() => setQuestListFilter(filter)}
+                >
+                  {filter === "all" ? "All" : filter}
+                </button>
+              )
+            )}
+          </div>
+          {questListLoading && <p className="note">Loading quests...</p>}
+          {questListError && <p className="note danger">{questListError}</p>}
+          {!questListLoading && filteredQuestRows.length === 0 && (
+            <p className="note">No quests match this filter.</p>
+          )}
+          {filteredQuestRows.length > 0 && (
+            <div className="table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>Quest PDA</th>
+                    <th>metadata_uri</th>
+                    <th>mode</th>
+                    <th>review</th>
+                    <th>status</th>
+                    <th>reward</th>
+                    <th>queue</th>
+                    <th>next</th>
+                    <th>expires</th>
+                    <th>actions</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {filteredQuestRows.map((row) => (
+                    <tr key={row.publicKey.toString()}>
+                      <td><code>{shortKey(row.publicKey)}</code></td>
+                      <td><code>{row.account.metadataUri}</code></td>
+                      <td>{enumName(row.account.mode)}</td>
+                      <td>{enumName(row.account.reviewMode)}</td>
+                      <td><span className={`pill ${enumName(row.account.status)}`}>{enumName(row.account.status)}</span></td>
+                      <td>{lamportsToSol(row.account.rewardPerCompletion)} SOL</td>
+                      <td>{row.account.pendingCount} / {row.account.queueMax}</td>
+                      <td>{row.account.nextSubmissionIndex.toString()} / {row.account.nextReviewIndex.toString()}</td>
+                      <td>{formatTime(row.account.expiresAt)}</td>
+                      <td className="row-actions">
+                        <button
+                          onClick={() =>
+                            run("fetch_quest", async () => {
+                              await fetchQuest(row.publicKey.toString());
+                              window.history.replaceState(null, "", `/quest/${row.publicKey.toString()}`);
+                              setActiveTab("detail");
+                            })
+                          }
+                        >
+                          View
+                        </button>
+                        <button className="secondary" onClick={() => copyText(row.publicKey.toString())}>Copy</button>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </section>
+      )}
+
+      {activeTab === "detail" && (
+        <section>
+          <div className="section-head">
+            <div>
+              <h2>Quest Detail</h2>
+              <p className="note">Open a quest by PDA, then use submitter, reviewer, and publisher tools against the same selection.</p>
+            </div>
+            <div className="inline-actions">
+              <input value={viewerQuestInput} onChange={(e) => setViewerQuestInput(e.target.value)} placeholder="Quest PDA" />
+              <button onClick={() => run("fetch_quest", () => fetchQuest(viewerQuestInput))}>Load</button>
+            </div>
+          </div>
+          {!questDetail && <p className="note">Select a quest from the dashboard or paste a Quest PDA.</p>}
+          {questDetail && (
+            <>
+              <div className="summary-grid">
+                <div><span>Quest</span><code>{selectedQuestPda}</code></div>
+                <div><span>Status</span><strong>{viewedStatus}</strong></div>
+                <div><span>Mode</span><strong>{selectedMode}</strong></div>
+                <div><span>Review</span><strong>{selectedReviewMode}</strong></div>
+                <div><span>Reward</span><strong>{lamportsToSol(questDetail.account.rewardPerCompletion)} SOL</strong></div>
+                <div><span>Queue</span><strong>{questDetail.account.pendingCount} / {questDetail.account.queueMax}</strong></div>
+              </div>
+
+              <div className="detail-columns">
+                <dl>
+                  <dt>publisher</dt><dd><code>{questDetail.account.publisher.toString()}</code></dd>
+                  <dt>reviewer</dt><dd><code>{questDetail.account.reviewer.toString()}</code></dd>
+                  <dt>verification_template</dt><dd>{enumName(questDetail.account.verificationTemplate)}</dd>
+                  <dt>authorized_verifier</dt><dd><code>{questDetail.account.authorizedVerifier.toString()}</code></dd>
+                  <dt>closing_reason</dt><dd>{enumName(questDetail.account.closingReason)}</dd>
+                  <dt>metadata_uri</dt><dd><code>{questDetail.account.metadataUri}</code></dd>
+                  <dt>verification_schema_uri</dt><dd><code>{questDetail.account.verificationSchemaUri || "n/a"}</code></dd>
+                </dl>
+                <dl>
+                  <dt>reward_pool</dt><dd>{lamportsToSol(questDetail.rewardPoolBalance)} SOL</dd>
+                  <dt>deposit_pool</dt><dd>{lamportsToSol(questDetail.depositPoolBalance)} SOL</dd>
+                  <dt>fee_vault</dt><dd>{lamportsToSol(questDetail.feeVaultBalance)} SOL</dd>
+                  <dt>public_goods_pool</dt><dd>{lamportsToSol(questDetail.publicGoodsPoolBalance)} SOL</dd>
+                  <dt>total_reward_funded</dt><dd>{lamportsToSol(questDetail.account.totalRewardFunded)} SOL</dd>
+                  <dt>total_deposit_funded</dt><dd>{lamportsToSol(questDetail.account.totalDepositFunded)} SOL</dd>
+                  <dt>total_fee_paid</dt><dd>{lamportsToSol(questDetail.account.totalFeePaid)} SOL</dd>
+                  <dt>total_paid_amount</dt><dd>{lamportsToSol(questDetail.account.totalPaidAmount)} SOL</dd>
+                </dl>
+                <dl>
+                  <dt>next_submission_index</dt><dd>{questDetail.account.nextSubmissionIndex.toString()}</dd>
+                  <dt>next_review_index</dt><dd>{questDetail.account.nextReviewIndex.toString()}</dd>
+                  <dt>start_at</dt><dd>{formatTime(questDetail.account.startAt)}</dd>
+                  <dt>expires_at</dt><dd>{formatTime(questDetail.account.expiresAt)}</dd>
+                  <dt>current time</dt><dd>{formatTime(questDetail.chainNow)}</dd>
+                  <dt>expired</dt><dd>{selectedQuestExpired ? "yes" : "no"}</dd>
+                  <dt>current_cycle_index</dt><dd>{selectedMode === "recurring" ? questDetail.currentCycleIndex : "n/a"}</dd>
+                </dl>
+              </div>
+            </>
+          )}
+        </section>
+      )}
+
+      {activeTab === "create" && (
         <section>
           <h2>{t.create}</h2>
+          <div className="form-grid">
           <label>
             mode
             <select value={mode} onChange={(event) => setMode(event.target.value as "oneTime" | "recurring")}>
@@ -750,19 +1146,39 @@ function App() {
           {!createFundingMultiple && <p className="note">initial_reward_funding must be a multiple of reward_per_completion.</p>}
           {!createDepositMultiple && <p className="note">deposit_amount must be a multiple of reward_per_completion.</p>}
           {!createDepositEnough && <p className="note">deposit_amount must be at least required_deposit.</p>}
+          {!createDurationValid && <p className="note">duration must be at least {MIN_DURATION_SECONDS} seconds.</p>}
+          {!createPeriodValid && <p className="note">Recurring quests require a positive period.</p>}
           {reviewMode === "autoVerified" && !autoCreateValid && <p className="note">AutoVerified requires verifier, schema URI, and a non-zero 32-byte template hash.</p>}
+          </div>
           <button disabled={!createFormValid} onClick={() => run("create_quest", createQuest)}>{t.create}</button>
           {lastQuest && (
             <div className="output">
               <span>Quest PDA</span><code>{lastQuest}</code>
+              <span>RewardPool PDA</span><code>{lastRewardPool}</code>
+              <span>DepositPool PDA</span><code>{lastDepositPool}</code>
               <span>Share Link</span><code>{lastShareLink}</code>
             </div>
           )}
         </section>
+      )}
 
+      {activeTab === "submitter" && (
         <section>
-          <h2>{t.submit}</h2>
-          <label>Quest PDA<input value={questPdaInput} onChange={(e) => setQuestPdaInput(e.target.value)} /></label>
+          <h2>User / Submitter Tools</h2>
+          <div className="inline-actions">
+            <input value={questPdaInput} onChange={(e) => setQuestPdaInput(e.target.value)} placeholder="Quest PDA" />
+            <button onClick={() => run("fetch_quest", () => fetchQuest(questPdaInput))}>Load Quest</button>
+          </div>
+          {questDetail && (
+            <div className="summary-grid compact">
+              <div><span>status</span><strong>{viewedStatus}</strong></div>
+              <div><span>queue</span><strong>{questDetail.account.pendingCount} / {questDetail.account.queueMax}</strong></div>
+              <div><span>expired</span><strong>{selectedQuestExpired ? "yes" : "no"}</strong></div>
+              <div><span>your state</span><strong>{currentUserStateText}</strong></div>
+              <div><span>UserProgress PDA</span><code>{selectedUserProgressPda?.toString() ?? "connect wallet"}</code></div>
+              <div><span>can submit</span><strong>{!submitDisabled ? "yes" : "no"}</strong></div>
+            </div>
+          )}
           <label>proof_uri<input value={proofUri} onChange={(e) => setProofUri(e.target.value)} /></label>
           {questDetail && <p className="note">pending_count / queue_max: {questDetail.account.pendingCount} / {questDetail.account.queueMax}</p>}
           {questDetail && enumName(questDetail.account.mode) === "oneTime" && <p className="note">OneTime: each user can complete once.</p>}
@@ -771,32 +1187,82 @@ function App() {
               current_cycle_index: {questDetail.currentCycleIndex}; your state: {cycleStateLabel(currentUserCycleState)}
             </p>
           )}
+          {questDetail && questDetail.account.pendingCount >= questDetail.account.queueMax && <p className="note">Queue is full.</p>}
+          {questDetail && selectedQuestExpired && <p className="note">Quest is expired.</p>}
           <button disabled={submitDisabled} onClick={() => run("submit_proof", submitProof)}>{t.submit}</button>
-          {lastSubmission && <div className="output"><span>Submission PDA</span><code>{lastSubmission}</code></div>}
+          {lastSubmission && (
+            <div className="output">
+              <span>submission_index</span><code>{questDetail?.account.nextSubmissionIndex.sub(new anchor.BN(1)).toString() ?? "latest"}</code>
+              <span>Submission PDA</span><code>{lastSubmission}</code>
+              <span>status</span><code>Pending</code>
+            </div>
+          )}
         </section>
+      )}
 
+      {activeTab === "reviewer" && (
         <section>
-          <h2>{t.approve} / {t.reject}</h2>
-          <label>Quest PDA<input value={reviewQuestInput} onChange={(e) => setReviewQuestInput(e.target.value)} /></label>
-          <label>submission_index<input value={reviewIndexInput} onChange={(e) => setReviewIndexInput(e.target.value)} /></label>
-          {questDetail && <p className="note">review_mode: {enumName(questDetail.account.reviewMode)}; next_review_index: {questDetail.account.nextReviewIndex.toString()}</p>}
-          <button onClick={() => run("approve_submission", () => approveOrReject(true))}>{t.approve}</button>{" "}
-          <button onClick={() => run("reject_submission", () => approveOrReject(false))}>{t.reject}</button>
+          <h2>Reviewer Tools</h2>
+          <div className="inline-actions">
+            <input value={reviewQuestInput} onChange={(e) => setReviewQuestInput(e.target.value)} placeholder="Quest PDA" />
+            <button onClick={() => run("load_review_item", async () => {
+              await fetchQuest(reviewQuestInput);
+              await loadCurrentReviewSubmission(reviewQuestInput);
+            })}>Load Next</button>
+          </div>
+          {questDetail && <p className="note">review_mode: {selectedReviewMode}; next_review_index: {questDetail.account.nextReviewIndex.toString()}</p>}
+          <p className="note">{reviewLoadStatus}</p>
+          {currentReviewSubmission ? (
+            <dl>
+              <dt>submission PDA</dt><dd><code>{currentReviewSubmission.pda.toString()}</code></dd>
+              <dt>submission_index</dt><dd>{currentReviewSubmission.account.submissionIndex.toString()}</dd>
+              <dt>submitter</dt><dd><code>{currentReviewSubmission.account.submitter.toString()}</code></dd>
+              <dt>cycle_index</dt><dd>{currentReviewSubmission.account.cycleIndex.toString()}</dd>
+              <dt>proof_uri</dt><dd><code>{currentReviewSubmission.account.proofUri}</code></dd>
+              <dt>status</dt><dd>{enumName(currentReviewSubmission.account.status)}</dd>
+              <dt>submitted_at</dt><dd>{formatTime(currentReviewSubmission.account.submittedAt)}</dd>
+            </dl>
+          ) : (
+            <p className="note">No pending submission loaded.</p>
+          )}
+          <div className="button-row">
+            {selectedReviewMode === "manual" && (
+              <button disabled={!canManualApprove} onClick={() => run("approve_submission", () => approveOrReject(true))}>{t.approve}</button>
+            )}
+            <button disabled={!currentReviewSubmission || viewedStatus === "closed"} onClick={() => run("reject_submission", () => approveOrReject(false))}>{t.reject}</button>
+          </div>
+          {selectedReviewMode === "autoVerified" && (
           <div className="detail-form">
             <h2>Auto Approve</h2>
-            <p className="note">Paste a verifier signature for the structured LootLoopAutoReviewV1 message. Do not put verifier private keys in the frontend.</p>
+            <p className="note">Mock verifier signature flow: paste a verifier-server signature for the Borsh LootLoopAutoReviewV1 message. Do not put real verifier private keys in frontend code.</p>
+            {questDetail && <p className="note">template_config_hash: {Buffer.from(questDetail.account.templateConfigHash).toString("hex")}</p>}
+            {autoUsedProofPreview && <p className="note">UsedProof PDA: {autoUsedProofPreview}</p>}
             <label>verified_value<input value={autoVerifiedValue} onChange={(e) => setAutoVerifiedValue(e.target.value)} /></label>
             <label>external_proof_hash hex<input value={autoExternalProofHash} onChange={(e) => setAutoExternalProofHash(e.target.value)} /></label>
+            <label>verified_at unix seconds<input value={autoVerifiedAt} onChange={(e) => setAutoVerifiedAt(e.target.value)} /></label>
             <label>expires_at unix seconds<input value={autoExpiresAt} onChange={(e) => setAutoExpiresAt(e.target.value)} /></label>
+            {!autoExpiresFuture && <p className="note">expires_at must be greater than the current time.</p>}
+            {!autoTtlValid && <p className="note">verified_at must not be in the future, and expires_at - verified_at must be 1 to {MAX_VERIFICATION_TTL_SECONDS} seconds.</p>}
             <label>nonce hex<input value={autoNonce} onChange={(e) => setAutoNonce(e.target.value)} /></label>
             <label>verifier signature hex<input value={autoSignature} onChange={(e) => setAutoSignature(e.target.value)} /></label>
-            <button onClick={() => run("auto_approve_submission", autoApproveSubmission)}>Auto Approve</button>
+            <button disabled={!canAutoApprove} onClick={() => run("auto_approve_submission", autoApproveSubmission)}>Auto Approve</button>
           </div>
+          )}
         </section>
+      )}
 
+      {activeTab === "publisher" && (
         <section>
+          <h2>Publisher Tools</h2>
+          <div className="inline-actions">
+            <input value={fundQuestInput} onChange={(e) => {
+              setFundQuestInput(e.target.value);
+              setCloseQuestInput(e.target.value);
+            }} placeholder="Quest PDA" />
+            <button onClick={() => run("fetch_quest", () => fetchQuest(fundQuestInput))}>Load Quest</button>
+          </div>
+          {questDetail && !isPublisher && <p className="note danger">Connected wallet is not this quest publisher. Fund and close are publisher-only.</p>}
           <h2>{t.fund}</h2>
-          <label>Quest PDA<input value={fundQuestInput} onChange={(e) => setFundQuestInput(e.target.value)} /></label>
           <label>reward_funding_amount SOL<input value={fundReward} onChange={(e) => setFundReward(e.target.value)} /></label>
           <label>additional_deposit_amount SOL<input value={fundDeposit} onChange={(e) => setFundDeposit(e.target.value)} /></label>
           <div className="duration">
@@ -805,21 +1271,27 @@ function App() {
             <label>extend minutes<input value={extendMinutes} onChange={(e) => setExtendMinutes(e.target.value)} /></label>
           </div>
           <p className="note">platform fee: {lamportsToSol(fundFee)} SOL</p>
+          {questDetail && !fundRewardMultiple && <p className="note">reward_funding_amount must be a multiple of reward_per_completion.</p>}
+          {questDetail && !fundDepositMultiple && <p className="note">additional_deposit_amount must be a multiple of reward_per_completion.</p>}
           {questDetail && fundDisabled && <p className="note">fund_quest is disabled outside Open; Closing cannot return to Open.</p>}
-          <button disabled={fundDisabled} onClick={() => run("fund_quest", fundQuest)}>{t.fund}</button>
-        </section>
-
-        <section>
+          <button disabled={fundDisabled || !fundRewardMultiple || !fundDepositMultiple} onClick={() => run("fund_quest", fundQuest)}>{t.fund}</button>
+          <div className="detail-form">
           <h2>{t.close}</h2>
-          <label>Quest PDA<input value={closeQuestInput} onChange={(e) => setCloseQuestInput(e.target.value)} /></label>
+          <p className="note">Early close: stops new submissions; pending continues; remaining deposit pays 1% fee and then moves to public goods. Expired close: remaining reward and deposit return to publisher after pending clears.</p>
+          {questDetail && <p className="note">settlement route: {enumName(questDetail.account.closingReason) === "expired" ? "publisher refund" : "public goods / early close"}</p>}
           <button disabled={closeDisabled} onClick={() => run("close_quest", closeQuest)}>Close Quest</button>{" "}
           <button disabled={settleDisabled} onClick={() => run("settle_quest", settleQuest)}>Settle Quest</button>
+          </div>
         </section>
+      )}
 
-        <section className="wide">
-          <h2>{t.viewer}</h2>
-          <label>Quest PDA<input value={viewerQuestInput} onChange={(e) => setViewerQuestInput(e.target.value)} /></label>
-          <button onClick={() => run("fetch_quest", () => fetchQuest(viewerQuestInput))}>Fetch Quest</button>
+      {activeTab === "state" && (
+        <section>
+          <h2>Protocol State Viewer</h2>
+          <div className="inline-actions">
+            <input value={viewerQuestInput} onChange={(e) => setViewerQuestInput(e.target.value)} placeholder="Quest PDA" />
+            <button onClick={() => run("fetch_quest", () => fetchQuest(viewerQuestInput))}>Fetch Quest</button>
+          </div>
           {questDetail && (
             <dl>
               <dt>quest</dt><dd><code>{questDetail.quest.toString()}</code></dd>
@@ -861,7 +1333,7 @@ function App() {
             </dl>
           )}
         </section>
-      </div>
+      )}
     </main>
   );
 }

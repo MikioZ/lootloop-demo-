@@ -253,11 +253,43 @@
           }
         },
         {
+          "name": "used_proof",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  117,
+                  115,
+                  101,
+                  100,
+                  95,
+                  112,
+                  114,
+                  111,
+                  111,
+                  102
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "quest"
+              },
+              {
+                "kind": "arg",
+                "path": "external_proof_hash"
+              }
+            ]
+          }
+        },
+        {
           "name": "instructions_sysvar",
           "address": "Sysvar1nstructions1111111111111111111111111"
         },
         {
           "name": "caller",
+          "writable": true,
           "signer": true
         },
         {
@@ -266,6 +298,15 @@
         }
       ],
       "args": [
+        {
+          "name": "external_proof_hash",
+          "type": {
+            "array": [
+              "u8",
+              32
+            ]
+          }
+        },
         {
           "name": "verification_result",
           "type": {
@@ -1106,6 +1147,19 @@
       ]
     },
     {
+      "name": "UsedProof",
+      "discriminator": [
+        28,
+        76,
+        121,
+        15,
+        141,
+        182,
+        204,
+        249
+      ]
+    },
+    {
       "name": "UserProgress",
       "discriminator": [
         195,
@@ -1202,91 +1256,101 @@
     },
     {
       "code": 6016,
+      "name": "VerificationFromFuture",
+      "msg": "The verification result was produced in the future"
+    },
+    {
+      "code": 6017,
       "name": "VerificationExpired",
       "msg": "The verification result has expired"
     },
     {
-      "code": 6017,
+      "code": 6018,
+      "name": "VerificationTtlTooLong",
+      "msg": "The verification result TTL is too long"
+    },
+    {
+      "code": 6019,
       "name": "InvalidEd25519Instruction",
       "msg": "The Ed25519 verification instruction is missing or invalid"
     },
     {
-      "code": 6018,
+      "code": 6020,
       "name": "InvalidVerifierSignature",
       "msg": "The verifier signature does not match the expected message"
     },
     {
-      "code": 6019,
+      "code": 6021,
       "name": "InvalidQuestStatus",
       "msg": "The quest is not in the required status"
     },
     {
-      "code": 6020,
+      "code": 6022,
       "name": "InvalidSubmissionStatus",
       "msg": "The submission is not in the required status"
     },
     {
-      "code": 6021,
+      "code": 6023,
       "name": "InvalidSubmissionQuest",
       "msg": "The submission does not belong to the provided quest"
     },
     {
-      "code": 6022,
+      "code": 6024,
       "name": "InvalidReviewOrder",
       "msg": "The submission index is not the next review index"
     },
     {
-      "code": 6023,
+      "code": 6025,
       "name": "QueueFull",
       "msg": "The quest queue is full"
     },
     {
-      "code": 6024,
+      "code": 6026,
       "name": "OneTimeAlreadySubmitted",
       "msg": "The user already has a pending or completed one-time submission"
     },
     {
-      "code": 6025,
+      "code": 6027,
       "name": "CycleAlreadySubmitted",
       "msg": "The user already submitted in this recurring cycle"
     },
     {
-      "code": 6026,
+      "code": 6028,
       "name": "MathOverflow",
       "msg": "Math operation overflowed"
     },
     {
-      "code": 6027,
+      "code": 6029,
       "name": "DurationTooShort",
       "msg": "The quest duration is shorter than the minimum allowed duration"
     },
     {
-      "code": 6028,
+      "code": 6030,
       "name": "QuestExpired",
       "msg": "The quest has expired"
     },
     {
-      "code": 6029,
+      "code": 6031,
       "name": "InvalidDeadlineExtension",
       "msg": "The quest deadline extension is invalid"
     },
     {
-      "code": 6030,
+      "code": 6032,
       "name": "InvalidFeeAmount",
       "msg": "Invalid fee calculation"
     },
     {
-      "code": 6031,
+      "code": 6033,
       "name": "InsufficientPoolBalance",
       "msg": "The pool does not have enough lamports for this transfer"
     },
     {
-      "code": 6032,
+      "code": 6034,
       "name": "PendingSubmissionsRemaining",
       "msg": "The quest still has pending submissions"
     },
     {
-      "code": 6033,
+      "code": 6035,
       "name": "UnreviewedSubmissionsRemaining",
       "msg": "The quest review index has not caught up to the submission index"
     }
@@ -1587,6 +1651,47 @@
           },
           {
             "name": "Rejected"
+          }
+        ]
+      }
+    },
+    {
+      "name": "UsedProof",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "quest",
+            "type": "pubkey"
+          },
+          {
+            "name": "external_proof_hash",
+            "type": {
+              "array": [
+                "u8",
+                32
+              ]
+            }
+          },
+          {
+            "name": "submission_index",
+            "type": "u64"
+          },
+          {
+            "name": "submitter",
+            "type": "pubkey"
+          },
+          {
+            "name": "cycle_index",
+            "type": "u64"
+          },
+          {
+            "name": "used_at",
+            "type": "i64"
+          },
+          {
+            "name": "bump",
+            "type": "u8"
           }
         ]
       }
