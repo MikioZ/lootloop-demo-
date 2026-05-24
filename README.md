@@ -258,6 +258,7 @@ Use `anchor test --provider.cluster localnet` for automated tests. Avoid default
 - [Architecture](docs/architecture.md)
 - [Security](docs/security.md)
 - [Invariants](docs/invariants.md)
+- [Threat Model / Audit Checklist](docs/threat-model.md)
 - [Demo Walkthrough](docs/demo-walkthrough.md)
 - [AI-Assisted Development](docs/ai-assisted-development.md)
 - [Detailed Flow](docs/flow.md)
